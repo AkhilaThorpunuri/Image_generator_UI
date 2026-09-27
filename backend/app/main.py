@@ -2965,78 +2965,6 @@ def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
     if not path.exists(): raise HTTPException(status_code=404, detail="Generated image was not found.")
     return FileResponse(path,media_type="image/png",filename=path.name)
-@app.post("/api/social-media/generate")
-async def generate_social_media_description(
-    filename: str = Form(...),
-    prompt: str = Form(""),
-    template_json: str = Form("{}"),
-):
-    """Generate social-media descriptions for an already generated image."""
-
-    safe_name = Path(filename).name
-
-    if not safe_name:
-        raise HTTPException(
-            status_code=400,
-            detail="Generated image filename is required.",
-        )
-
-    image_path = IMAGE_OUTPUT_DIR / safe_name
-
-    if not image_path.exists() or not image_path.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="Generated image was not found on the server.",
-        )
-
-    key_id, pipeline_item = _require_pipeline_key()
-
-    try:
-        content = _build_social_media_description(
-            prompt,
-            template_json,
-            safe_name,
-            pipeline_item,
-        )
-
-        description_name = _safe_social_media_name(safe_name)
-
-        description_path = IMAGE_OUTPUT_DIR / description_name
-
-        description_path.write_text(
-            content,
-            encoding="utf-8",
-        )
-
-        return {
-            "success": True,
-            "filename": safe_name,
-            "social_media_filename": description_name,
-            "social_media_file_url": (
-                f"/api/social-media/output/{quote(description_name)}"
-            ),
-            "provider": pipeline_item.get(
-                "display_name",
-                "Selected API",
-            ),
-            "model": _provider_text_model(pipeline_item),
-            "api_id": key_id,
-            "word_count": _word_count(content),
-            "content": content,
-            "message": "Social-media description generated successfully.",
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Unable to generate the social-media description: "
-                f"{exc}"
-            ),
-        ) from exc
 
 
 @app.post("/api/images/save-to-drive")
@@ -3139,18 +3067,7 @@ async def generate_prompt_with_ai(
 
     source = source.strip()
 
-    description_candidates = _selected_stage_candidates("text")
-
-if not description_candidates:
-    raise HTTPException(
-        status_code=400,
-        detail=_stage_capability_message(
-            "text",
-            API_KEY_STATE.get("selected_ids", []),
-        ),
-    )
-
-key_id, pipeline_item = description_candidates[0]
+    key_id, pipeline_item = _require_pipeline_key()
 
     def run_prompt(**kwargs):
         return _pipeline_prompt(pipeline_item, **kwargs)
@@ -3460,7 +3377,7 @@ async def generate_template_endpoint(
             detail="Unsupported reference source.",
         )
 
-    key_id, pipeline_item = _require_pipeline_key("text")
+    key_id, pipeline_item = _require_pipeline_key()
 
     def run_template(**kwargs):
         return _pipeline_template(pipeline_item, **kwargs)
