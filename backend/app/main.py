@@ -2959,7 +2959,116 @@ async def generate_output_image(
         "changes": {},
     }
 
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """
+    Compatibility endpoint used by the existing frontend Generate Description
+    button.
 
+    It generates a description from the already-generated image without
+    modifying the existing image-generation pipeline.
+    """
+
+    safe_name = Path(filename).name
+
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if (
+        not image_path.exists()
+        or not image_path.is_file()
+        or not is_valid_image_file(image_path)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found or is not a valid image.",
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item
+        in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
+    errors = []
+
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            description = _pipeline_description(
+                pipeline_item,
+                image_path,
+                prompt.strip(),
+            )
+
+            if description:
+                API_KEY_STATE["pipeline_key_id"] = key_id
+
+                return {
+                    "success": True,
+                    "filename": safe_name,
+                    "description": description,
+                    "content": description,
+                    "provider": pipeline_item.get(
+                        "display_name",
+                        "Selected API",
+                    ),
+                    "model": _provider_text_model(
+                        pipeline_item
+                    ),
+                    "api_id": key_id,
+                    "message": (
+                        "Generated-image description "
+                        "generated successfully."
+                    ),
+                }
+
+        except Exception as exc:
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    fallback = (
+        f"Generated image based on the requested content: "
+        f"{prompt.strip()}"
+        if prompt.strip()
+        else
+        "Generated image created successfully "
+        "from the selected reference."
+    )
+
+    return {
+        "success": True,
+        "filename": safe_name,
+        "description": fallback,
+        "content": fallback,
+        "provider": "Generated-image fallback",
+        "model": "",
+        "api_id": "fallback",
+        "warning": " | ".join(errors),
+        "message": (
+            "Generated-image description returned "
+            "using fallback text."
+        ),
+    }
 @app.get("/api/images/output/{filename}")
 def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
