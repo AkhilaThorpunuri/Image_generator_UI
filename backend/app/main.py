@@ -578,9 +578,19 @@ def _key_config(item: dict) -> dict:
 
 
 def _provider_base_url(item: dict) -> str:
-    service = str(item.get("service", "other"))
-    if service == "openai": return "https://api.openai.com/v1"
-    if service == "openrouter": return OPENROUTER_BASE_URL
+    service = str(item.get("service", "other")).strip().lower()
+
+    # Built-in Gemini adapter does not require a user-supplied base URL.
+    # _gemini_image() uses the official Gemini client directly.
+    if service == "gemini":
+        return "https://generativelanguage.googleapis.com"
+
+    if service == "openai":
+        return "https://api.openai.com/v1"
+
+    if service == "openrouter":
+        return OPENROUTER_BASE_URL
+
     return _key_config(item).get("base_url", "")
 
 
