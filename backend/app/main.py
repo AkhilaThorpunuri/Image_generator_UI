@@ -2990,23 +2990,17 @@ async def generate_social_media_description(
             API_KEY_STATE["pipeline_key_id"] = key_id
 
             return {
-                "success": True,
-                "filename": safe_name,
-                "content": text,
-                "description": text,
-                "provider": pipeline_item.get(
-                    "display_name",
-                    "Selected API",
-                ),
-                "model": _provider_text_model(
-                    pipeline_item
-                ),
-                "api_id": key_id,
-                "template_json": template_json,
-                "message": (
-                    "Social-media description generated successfully."
-                ),
-            }
+            "success": True,
+            "filename": safe_name,
+            "content": content,
+            "social_media_filename": description_name,
+            "social_media_file_url": f"/api/social-media/output/{quote(description_name)}",
+            "provider": pipeline_item.get("display_name", "Selected API"),
+            "model": _provider_text_model(pipeline_item),
+            "api_id": key_id,
+            "word_count": _word_count(content),
+            "message": "Social-media description file generated successfully.",
+        }
 
         except Exception as exc:
 
