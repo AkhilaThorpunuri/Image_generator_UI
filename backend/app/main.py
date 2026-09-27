@@ -3027,9 +3027,8 @@ async def generate_social_media_description(
     """
     Generate social-media content for an already generated image.
 
-    The frontend sends this request as multipart/form-data, so the endpoint
-    intentionally uses Form() rather than Body(). This does not change the
-    existing image-generation pipeline.
+    This endpoint is intentionally separate from the image-generation
+    pipeline. It uses the generated PNG already stored in IMAGE_OUTPUT_DIR.
     """
 
     safe_name = Path(filename).name
@@ -3042,14 +3041,23 @@ async def generate_social_media_description(
 
     image_path = IMAGE_OUTPUT_DIR / safe_name
 
-    if (
-        not image_path.exists()
-        or not image_path.is_file()
-        or not is_valid_image_file(image_path)
-    ):
+    # The frontend sends the filename returned by /api/images/generate.
+    # Check the exact same output directory used by image generation.
+    if not image_path.exists() or not image_path.is_file():
         raise HTTPException(
             status_code=404,
-            detail="Generated image was not found or is not a valid image.",
+            detail=(
+                f"Generated image '{safe_name}' was not found on the backend. "
+                "Generate the image again before generating its social-media description."
+            ),
+        )
+
+    if not is_valid_image_file(image_path):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Generated image '{safe_name}' exists but is not a readable image."
+            ),
         )
 
     selected_candidates = [
@@ -3075,21 +3083,22 @@ async def generate_social_media_description(
 
         "Return EXACTLY these four sections:\n\n"
 
-        "DESCRIPTION:\n"
-        "Write 2 to 4 concise sentences describing the visible image, "
-        "main subject, visible message or text, visual style and composition.\n\n"
+        "[LINKEDIN]\n"
+        "Write a professional LinkedIn post based on the visible image "
+        "and the user's content request. Keep it concise and professional.\n\n"
 
-        "CAPTION:\n"
-        "Write one engaging social-media caption based only on the visible "
-        "content and the user's request.\n\n"
+        "[X / TWITTER]\n"
+        "Write a concise post suitable for X/Twitter. Keep it under 280 "
+        "characters when possible.\n\n"
 
-        "HASHTAGS:\n"
-        "Provide 5 to 10 relevant hashtags.\n\n"
+        "[FACEBOOK]\n"
+        "Write an engaging Facebook post based on the visible image.\n\n"
 
-        "ALT TEXT:\n"
-        "Write concise accessibility-friendly alt text describing the image.\n\n"
+        "[INSTAGRAM]\n"
+        "Write an engaging Instagram caption with relevant hashtags.\n\n"
 
-        "Do not invent facts that are not visible in the image.\n\n"
+        "Do not invent facts that are not visible in the image.\n"
+        "Do not describe objects that cannot reasonably be seen.\n\n"
 
         f"User's content request: {prompt.strip()}"
     )
@@ -3098,7 +3107,7 @@ async def generate_social_media_description(
         try:
             service = str(
                 pipeline_item.get("service", "other")
-            ).strip()
+            ).strip().lower()
 
             key = str(
                 pipeline_item.get("value", "")
@@ -3129,7 +3138,9 @@ async def generate_social_media_description(
                 from google import genai
                 from google.genai import types
 
-                client = genai.Client(api_key=key)
+                client = genai.Client(
+                    api_key=key
+                )
 
                 response = client.models.generate_content(
                     model=_provider_text_model(pipeline_item),
@@ -3148,6 +3159,50 @@ async def generate_social_media_description(
                     getattr(response, "text", "") or ""
                 ).strip()
 
+                # Defensive extraction for Gemini SDK responses
+                # where response.text is unavailable.
+                if not text:
+
+                    response_candidates = []
+
+                    candidates = getattr(
+                        response,
+                        "candidates",
+                        None,
+                    )
+
+                    if candidates:
+                        for candidate in candidates:
+
+                            candidate_content = getattr(
+                                candidate,
+                                "content",
+                                None,
+                            )
+
+                            parts = getattr(
+                                candidate_content,
+                                "parts",
+                                None,
+                            ) or []
+
+                            for part in parts:
+
+                                part_text = getattr(
+                                    part,
+                                    "text",
+                                    None,
+                                )
+
+                                if part_text:
+                                    response_candidates.append(
+                                        str(part_text)
+                                    )
+
+                    text = "\n".join(
+                        response_candidates
+                    ).strip()
+
             # ---------------------------------------------------------
             # Other configured providers
             # ---------------------------------------------------------
@@ -3165,22 +3220,46 @@ async def generate_social_media_description(
                     "social-media description."
                 )
 
-            # Keep the provider response exactly as returned.
-            # The frontend already knows how to parse the four sections.
+            # Save the generated description locally.
+            description_name = (
+                f"{Path(safe_name).stem}_description.txt"
+            )
+
+            description_path = (
+                IMAGE_OUTPUT_DIR / description_name
+            )
+
+            description_path.write_text(
+                text,
+                encoding="utf-8",
+            )
+
             API_KEY_STATE["pipeline_key_id"] = key_id
 
             return {
-            "success": True,
-            "filename": safe_name,
-            "content": content,
-            "social_media_filename": description_name,
-            "social_media_file_url": f"/api/social-media/output/{quote(description_name)}",
-            "provider": pipeline_item.get("display_name", "Selected API"),
-            "model": _provider_text_model(pipeline_item),
-            "api_id": key_id,
-            "word_count": _word_count(content),
-            "message": "Social-media description file generated successfully.",
-        }
+                "success": True,
+                "filename": safe_name,
+                "content": text,
+                "description": text,
+                "social_media_filename": description_name,
+                "social_media_file_url": (
+                    f"/api/social-media/output/"
+                    f"{quote(description_name)}"
+                ),
+                "provider": pipeline_item.get(
+                    "display_name",
+                    "Selected API",
+                ),
+                "model": _provider_text_model(
+                    pipeline_item
+                ),
+                "api_id": key_id,
+                "word_count": len(text.split()),
+                "message": (
+                    "Social-media description generated "
+                    "successfully."
+                ),
+            }
 
         except Exception as exc:
 
@@ -3195,6 +3274,25 @@ async def generate_social_media_description(
             "using the selected API keys. "
             + " | ".join(errors)
         ),
+    )
+@app.get("/api/social-media/output/{filename}")
+def get_social_media_file(filename: str):
+    path = IMAGE_OUTPUT_DIR / Path(filename).name
+
+    if (
+        not path.exists()
+        or not path.is_file()
+        or path.suffix.lower() != ".txt"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Social-media text file was not found.",
+        )
+
+    return FileResponse(
+        path,
+        media_type="text/plain; charset=utf-8",
+        filename=path.name,
     )
 @app.post("/api/images/generate")
 async def generate_output_image(
