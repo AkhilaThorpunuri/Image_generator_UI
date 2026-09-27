@@ -2838,6 +2838,9 @@ async def describe_generated_image(payload: dict = Body(...)):
         "provider": "Generated-image fallback",
         "warning": " | ".join(errors),
     }
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(payload: dict = Body(...)):
+    return await describe_generated_image(payload)
 
 @app.post("/api/images/generate")
 async def generate_output_image(
