@@ -3294,6 +3294,130 @@ def get_social_media_file(filename: str):
         media_type="text/plain; charset=utf-8",
         filename=path.name,
     )
+@app.post("/api/social-media/save-to-drive")
+def save_social_media_description_to_drive(
+    filename: str = Form(...)
+):
+    """Save only the generated social-media TXT file into Google Drive/outputs."""
+
+    require_drive_configuration()
+
+    safe_name = Path(filename).name
+
+    if not safe_name or not safe_name.lower().endswith(".txt"):
+        raise HTTPException(
+            status_code=400,
+            detail="A valid social-media description filename is required.",
+        )
+
+    local_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if not local_path.exists() or not local_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The social-media description file was not found on the server.",
+        )
+
+    try:
+        service = get_drive_service()
+
+        parent_folder_id = resolve_drive_folder_id(
+            service,
+            normalize_drive_folder_id(
+                API_KEY_STATE.get("drive_folder_id", "")
+            ),
+            str(
+                API_KEY_STATE.get("drive_folder_name", "")
+                or ""
+            ),
+        )
+
+        outputs_folder_id = ensure_drive_outputs_folder(
+            service,
+            parent_folder_id,
+        )
+
+        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
+        API_KEY_STATE["drive_output_folder_name"] = "outputs"
+
+        persist_drive_configuration()
+
+        escaped_name = safe_name.replace(
+            chr(39),
+            chr(92) + chr(39),
+        )
+
+        existing = (
+            service.files()
+            .list(
+                q=(
+                    f"'{outputs_folder_id}' in parents "
+                    f"and name = '{escaped_name}' "
+                    "and trashed = false"
+                ),
+                pageSize=10,
+                fields="files(id,name,webViewLink)",
+            )
+            .execute()
+            .get("files", [])
+        )
+
+        media = MediaIoBaseUpload(
+            io.BytesIO(local_path.read_bytes()),
+            mimetype="text/plain",
+            resumable=False,
+        )
+
+        if existing:
+            drive_file = (
+                service.files()
+                .update(
+                    fileId=existing[0]["id"],
+                    media_body=media,
+                    fields="id,name,webViewLink",
+                )
+                .execute()
+            )
+        else:
+            drive_file = (
+                service.files()
+                .create(
+                    body={
+                        "name": safe_name,
+                        "parents": [outputs_folder_id],
+                    },
+                    media_body=media,
+                    fields="id,name,webViewLink",
+                )
+                .execute()
+            )
+
+        return {
+            "success": True,
+            "filename": safe_name,
+            "drive_file_id": drive_file.get("id", ""),
+            "drive_folder": "outputs",
+            "drive_url": drive_file.get(
+                "webViewLink",
+                "",
+            ),
+            "message": (
+                "Social-media description saved "
+                "to Google Drive/outputs."
+            ),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to save the social-media description "
+                f"to Google Drive: {exc}"
+            ),
+        ) from exc    
 @app.post("/api/images/generate")
 async def generate_output_image(
     source_type: str = Form(...),
