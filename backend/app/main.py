@@ -3139,7 +3139,18 @@ async def generate_prompt_with_ai(
 
     source = source.strip()
 
-    key_id, pipeline_item = _require_pipeline_key()
+    description_candidates = _selected_stage_candidates("text")
+
+if not description_candidates:
+    raise HTTPException(
+        status_code=400,
+        detail=_stage_capability_message(
+            "text",
+            API_KEY_STATE.get("selected_ids", []),
+        ),
+    )
+
+key_id, pipeline_item = description_candidates[0]
 
     def run_prompt(**kwargs):
         return _pipeline_prompt(pipeline_item, **kwargs)
@@ -3449,7 +3460,7 @@ async def generate_template_endpoint(
             detail="Unsupported reference source.",
         )
 
-    key_id, pipeline_item = _require_pipeline_key()
+    key_id, pipeline_item = _require_pipeline_key("text")
 
     def run_template(**kwargs):
         return _pipeline_template(pipeline_item, **kwargs)
