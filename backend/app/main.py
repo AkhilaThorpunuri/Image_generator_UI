@@ -2839,8 +2839,78 @@ async def describe_generated_image(payload: dict = Body(...)):
         "warning": " | ".join(errors),
     }
 @app.post("/api/social-media/generate")
-async def generate_social_media_description(payload: dict = Body(...)):
-    return await describe_generated_image(payload)
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """Generate the optional LinkedIn/Facebook/Instagram TXT file after image generation."""
+
+    safe_name = Path(filename).name
+
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found on the server.",
+        )
+
+    key_id, pipeline_item = _require_pipeline_key()
+
+    try:
+        content = _build_social_media_description(
+            prompt,
+            template_json,
+            safe_name,
+            pipeline_item,
+        )
+
+        description_name = _safe_social_media_name(safe_name)
+        description_path = IMAGE_OUTPUT_DIR / description_name
+
+        description_path.write_text(
+            content,
+            encoding="utf-8",
+        )
+
+        return {
+            "success": True,
+            "filename": safe_name,
+            "social_media_filename": description_name,
+            "social_media_file_url": (
+                f"/api/social-media/output/{quote(description_name)}"
+            ),
+            "provider": pipeline_item.get(
+                "display_name",
+                "Selected API",
+            ),
+            "model": _provider_text_model(pipeline_item),
+            "api_id": key_id,
+            "word_count": _word_count(content),
+            "content": content,
+            "message": (
+                "Social-media description file generated successfully."
+            ),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to generate the social-media description: "
+                f"{exc}"
+            ),
+        ) from exc
 
 @app.post("/api/images/generate")
 async def generate_output_image(
