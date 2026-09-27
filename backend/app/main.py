@@ -840,7 +840,187 @@ def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str)
     if service=="openai": return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
     return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
 
+def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
+    """Generate social-media text using the selected text-capable API."""
+    service = str(
+        pipeline_item.get("service") or ""
+    ).strip().lower()
 
+    model = str(
+        _provider_text_model(pipeline_item) or ""
+    ).strip()
+
+    api_key = str(
+        pipeline_item.get("value") or ""
+    ).strip()
+
+    if not api_key:
+        raise RuntimeError(
+            "The selected pipeline API key is empty."
+        )
+
+    if not model:
+        raise RuntimeError(
+            "The selected API key has no text-generation model configured."
+        )
+
+    # ---------------------------------------------------------
+    # Gemini
+    # ---------------------------------------------------------
+    if service == "gemini":
+
+        def call_gemini() -> str:
+            from google import genai
+
+            client = genai.Client(
+                api_key=api_key
+            )
+
+            response = client.models.generate_content(
+                model=model,
+                contents=instruction,
+            )
+
+            # Google GenAI normally exposes generated text through
+            # response.text. Keep extraction defensive so a provider
+            # response cannot produce an undefined-variable error.
+            generated_text = getattr(
+                response,
+                "text",
+                None,
+            )
+
+            if generated_text:
+                generated_text = str(
+                    generated_text
+                ).strip()
+
+            if generated_text:
+                return generated_text
+
+            # Defensive fallback for responses where .text is unavailable.
+            response_candidates = []
+
+            candidates = getattr(
+                response,
+                "candidates",
+                None,
+            )
+
+            if candidates:
+                for candidate in candidates:
+                    candidate_content = getattr(
+                        candidate,
+                        "content",
+                        None,
+                    )
+
+                    parts = getattr(
+                        candidate_content,
+                        "parts",
+                        None,
+                    ) or []
+
+                    for part in parts:
+                        part_text = getattr(
+                            part,
+                            "text",
+                            None,
+                        )
+
+                        if part_text:
+                            response_candidates.append(
+                                str(part_text)
+                            )
+
+            generated_text = "\n".join(
+                response_candidates
+            ).strip()
+
+            if not generated_text:
+                raise RuntimeError(
+                    "Gemini returned no text for the social-media description."
+                )
+
+            return generated_text
+
+        return _with_pipeline_key(
+            pipeline_item,
+            call_gemini,
+        )
+
+    # ---------------------------------------------------------
+    # OpenRouter
+    # ---------------------------------------------------------
+    if service == "openrouter":
+
+        result = _openrouter_request(
+            api_key,
+            "chat/completions",
+            {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You write platform-specific "
+                            "social-media captions. "
+                            "Follow the requested format "
+                            "and limits exactly. "
+                            "Keep emojis, icons, hashtags "
+                            "and supplied profile tags."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": instruction,
+                    },
+                ],
+                "temperature": 0.7,
+            },
+        )
+
+        return _extract_chat_text(
+            result,
+            "OpenRouter",
+        )
+
+    # ---------------------------------------------------------
+    # Generic OpenAI-compatible provider
+    # ---------------------------------------------------------
+    result = _generic_request(
+        pipeline_item,
+        "chat/completions",
+        {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You write platform-specific "
+                        "social-media captions. "
+                        "Follow the requested format "
+                        "and limits exactly. "
+                        "Keep emojis, icons, hashtags "
+                        "and supplied profile tags."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": instruction,
+                },
+            ],
+            "temperature": 0.7,
+        },
+    )
+
+    return _extract_chat_text(
+        result,
+        str(
+            pipeline_item.get("display_name")
+            or "API"
+        ),
+    )
 def _openrouter_image(api_key: str, path: Path, instruction: str, model: str | None = None) -> bytes:
     selected_model = str(model or OPENROUTER_IMAGE_MODEL).strip()
     if not selected_model:
