@@ -2839,24 +2839,28 @@ async def describe_generated_image(payload: dict = Body(...)):
         "warning": " | ".join(errors),
     }
 @app.post("/api/social-media/generate")
-async def generate_social_media_description(payload: dict = Body(...)):
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
     """
-    Generate social-media-ready content for an already generated image.
+    Generate social-media content for an already generated image.
 
-    This endpoint intentionally reuses the existing image-description
-    pipeline so the existing API-key selection and image-generation flow
-    remain unchanged.
+    The frontend sends this request as multipart/form-data, so the endpoint
+    intentionally uses Form() rather than Body(). This does not change the
+    existing image-generation pipeline.
     """
-    filename = Path(str(payload.get("filename", ""))).name
-    prompt = str(payload.get("prompt", "")).strip()
 
-    if not filename:
+    safe_name = Path(filename).name
+
+    if not safe_name:
         raise HTTPException(
             status_code=400,
             detail="Generated image filename is required.",
         )
 
-    image_path = IMAGE_OUTPUT_DIR / filename
+    image_path = IMAGE_OUTPUT_DIR / safe_name
 
     if (
         not image_path.exists()
@@ -2888,27 +2892,48 @@ async def generate_social_media_description(payload: dict = Body(...)):
     social_instruction = (
         "Analyze the supplied generated image and create social-media content "
         "for it.\n\n"
-        "Return EXACTLY these four sections:\n"
+
+        "Return EXACTLY these four sections:\n\n"
+
         "DESCRIPTION:\n"
         "Write 2 to 4 concise sentences describing the visible image, "
-        "main subject, message, visual style and composition.\n\n"
+        "main subject, visible message or text, visual style and composition.\n\n"
+
         "CAPTION:\n"
         "Write one engaging social-media caption based only on the visible "
         "content and the user's request.\n\n"
+
         "HASHTAGS:\n"
         "Provide 5 to 10 relevant hashtags.\n\n"
+
         "ALT TEXT:\n"
         "Write concise accessibility-friendly alt text describing the image.\n\n"
-        "Do not invent facts that are not visible in the image.\n"
-        f"User's content request: {prompt}"
+
+        "Do not invent facts that are not visible in the image.\n\n"
+
+        f"User's content request: {prompt.strip()}"
     )
 
     for key_id, pipeline_item in selected_candidates:
         try:
-            service = str(pipeline_item.get("service", "other"))
-            key = str(pipeline_item.get("value", "")).strip()
+            service = str(
+                pipeline_item.get("service", "other")
+            ).strip()
 
+            key = str(
+                pipeline_item.get("value", "")
+            ).strip()
+
+            if not key:
+                raise RuntimeError(
+                    "The selected API key is empty."
+                )
+
+            # ---------------------------------------------------------
+            # OpenRouter
+            # ---------------------------------------------------------
             if service == "openrouter":
+
                 text = _openrouter_chat_with_image(
                     key,
                     image_path,
@@ -2916,7 +2941,11 @@ async def generate_social_media_description(payload: dict = Body(...)):
                     _provider_text_model(pipeline_item),
                 )
 
+            # ---------------------------------------------------------
+            # Gemini
+            # ---------------------------------------------------------
             elif service == "gemini":
+
                 from google import genai
                 from google.genai import types
 
@@ -2925,7 +2954,9 @@ async def generate_social_media_description(payload: dict = Body(...)):
                 response = client.models.generate_content(
                     model=_provider_text_model(pipeline_item),
                     contents=[
-                        types.Part.from_text(text=social_instruction),
+                        types.Part.from_text(
+                            text=social_instruction
+                        ),
                         types.Part.from_bytes(
                             data=image_path.read_bytes(),
                             mime_type=get_mime_type(image_path),
@@ -2937,7 +2968,11 @@ async def generate_social_media_description(payload: dict = Body(...)):
                     getattr(response, "text", "") or ""
                 ).strip()
 
+            # ---------------------------------------------------------
+            # Other configured providers
+            # ---------------------------------------------------------
             else:
+
                 text = _generic_chat_with_image(
                     pipeline_item,
                     image_path,
@@ -2946,25 +2981,35 @@ async def generate_social_media_description(payload: dict = Body(...)):
 
             if not text:
                 raise RuntimeError(
-                    "The selected API returned an empty social-media description."
+                    "The selected API returned an empty "
+                    "social-media description."
                 )
 
-            # Do not require the AI to use perfect headings.
-            # Return the complete generated response to the frontend.
+            # Keep the provider response exactly as returned.
+            # The frontend already knows how to parse the four sections.
             API_KEY_STATE["pipeline_key_id"] = key_id
 
             return {
                 "success": True,
+                "filename": safe_name,
+                "content": text,
                 "description": text,
-                "social_media_content": text,
-                "api_id": key_id,
                 "provider": pipeline_item.get(
                     "display_name",
                     "Selected API",
                 ),
+                "model": _provider_text_model(
+                    pipeline_item
+                ),
+                "api_id": key_id,
+                "template_json": template_json,
+                "message": (
+                    "Social-media description generated successfully."
+                ),
             }
 
         except Exception as exc:
+
             errors.append(
                 f"{pipeline_item.get('display_name', key_id)}: {exc}"
             )
@@ -2973,7 +3018,7 @@ async def generate_social_media_description(payload: dict = Body(...)):
         status_code=502,
         detail=(
             "Unable to generate the social-media description "
-            "with the selected API keys. "
+            "using the selected API keys. "
             + " | ".join(errors)
         ),
     )
