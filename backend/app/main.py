@@ -2838,7 +2838,145 @@ async def describe_generated_image(payload: dict = Body(...)):
         "provider": "Generated-image fallback",
         "warning": " | ".join(errors),
     }
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(payload: dict = Body(...)):
+    """
+    Generate social-media-ready content for an already generated image.
 
+    This endpoint intentionally reuses the existing image-description
+    pipeline so the existing API-key selection and image-generation flow
+    remain unchanged.
+    """
+    filename = Path(str(payload.get("filename", ""))).name
+    prompt = str(payload.get("prompt", "")).strip()
+
+    if not filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / filename
+
+    if (
+        not image_path.exists()
+        or not image_path.is_file()
+        or not is_valid_image_file(image_path)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found or is not a valid image.",
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
+    errors = []
+
+    social_instruction = (
+        "Analyze the supplied generated image and create social-media content "
+        "for it.\n\n"
+        "Return EXACTLY these four sections:\n"
+        "DESCRIPTION:\n"
+        "Write 2 to 4 concise sentences describing the visible image, "
+        "main subject, message, visual style and composition.\n\n"
+        "CAPTION:\n"
+        "Write one engaging social-media caption based only on the visible "
+        "content and the user's request.\n\n"
+        "HASHTAGS:\n"
+        "Provide 5 to 10 relevant hashtags.\n\n"
+        "ALT TEXT:\n"
+        "Write concise accessibility-friendly alt text describing the image.\n\n"
+        "Do not invent facts that are not visible in the image.\n"
+        f"User's content request: {prompt}"
+    )
+
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            service = str(pipeline_item.get("service", "other"))
+            key = str(pipeline_item.get("value", "")).strip()
+
+            if service == "openrouter":
+                text = _openrouter_chat_with_image(
+                    key,
+                    image_path,
+                    social_instruction,
+                    _provider_text_model(pipeline_item),
+                )
+
+            elif service == "gemini":
+                from google import genai
+                from google.genai import types
+
+                client = genai.Client(api_key=key)
+
+                response = client.models.generate_content(
+                    model=_provider_text_model(pipeline_item),
+                    contents=[
+                        types.Part.from_text(text=social_instruction),
+                        types.Part.from_bytes(
+                            data=image_path.read_bytes(),
+                            mime_type=get_mime_type(image_path),
+                        ),
+                    ],
+                )
+
+                text = str(
+                    getattr(response, "text", "") or ""
+                ).strip()
+
+            else:
+                text = _generic_chat_with_image(
+                    pipeline_item,
+                    image_path,
+                    social_instruction,
+                )
+
+            if not text:
+                raise RuntimeError(
+                    "The selected API returned an empty social-media description."
+                )
+
+            # Do not require the AI to use perfect headings.
+            # Return the complete generated response to the frontend.
+            API_KEY_STATE["pipeline_key_id"] = key_id
+
+            return {
+                "success": True,
+                "description": text,
+                "social_media_content": text,
+                "api_id": key_id,
+                "provider": pipeline_item.get(
+                    "display_name",
+                    "Selected API",
+                ),
+            }
+
+        except Exception as exc:
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "Unable to generate the social-media description "
+            "with the selected API keys. "
+            + " | ".join(errors)
+        ),
+    )
 @app.post("/api/images/generate")
 async def generate_output_image(
     source_type: str = Form(...),
