@@ -165,6 +165,10 @@ CANVA_AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
 CANVA_TOKEN_URL = f"{CANVA_API_BASE_URL}/oauth/token"
 CANVA_CLIENT_ID_ENV = "CANVA_CONNECT_CLIENT_ID"
 CANVA_CLIENT_SECRET_ENV = "CANVA_CONNECT_CLIENT_SECRET"
+# Railway currently uses CANVA_CLIENT_ID / CANVA_CLIENT_SECRET.
+# Keep both names supported so Canva Connect works in the existing deployment.
+CANVA_CLIENT_ID_LEGACY_ENV = "CANVA_CLIENT_ID"
+CANVA_CLIENT_SECRET_LEGACY_ENV = "CANVA_CLIENT_SECRET"
 CANVA_REDIRECT_URI_ENV = "CANVA_CONNECT_REDIRECT_URI"
 CANVA_FRONTEND_URL_ENV = "CANVA_FRONTEND_URL"
 CANVA_SCOPES = "asset:write design:content:write"
@@ -3814,11 +3818,17 @@ async def generate_output_image(
 # -------------------------------------------------------------------
 
 def _canva_client_id() -> str:
-    return str(os.getenv(CANVA_CLIENT_ID_ENV, "") or "").strip()
+    return (
+        str(os.getenv(CANVA_CLIENT_ID_ENV, "") or "").strip()
+        or str(os.getenv(CANVA_CLIENT_ID_LEGACY_ENV, "") or "").strip()
+    )
 
 
 def _canva_client_secret() -> str:
-    return str(os.getenv(CANVA_CLIENT_SECRET_ENV, "") or "").strip()
+    return (
+        str(os.getenv(CANVA_CLIENT_SECRET_ENV, "") or "").strip()
+        or str(os.getenv(CANVA_CLIENT_SECRET_LEGACY_ENV, "") or "").strip()
+    )
 
 
 def _canva_redirect_uri() -> str:
@@ -4208,7 +4218,7 @@ def canva_create_from_generated_image(
     if not _canva_configured():
         raise HTTPException(
             status_code=500,
-            detail="Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET.",
+            detail="Canva Connect is not configured. Set CANVA_CLIENT_ID/CANVA_CLIENT_SECRET or CANVA_CONNECT_CLIENT_ID/CANVA_CONNECT_CLIENT_SECRET.",
         )
 
     try:
