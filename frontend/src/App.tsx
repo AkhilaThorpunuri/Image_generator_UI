@@ -1457,6 +1457,55 @@ function getApiServiceIcon(
   );
 }
 
+function inferSocialIcon(text: string, tags: string[] = []): string {
+  const value = `${text} ${tags.join(" ")}`.toLowerCase();
+
+  if (/\b(ai|artificial intelligence|machine learning|robot|automation|tech|technology|software|coding|developer|digital|cyber|data)\b/.test(value)) {
+    return "🤖";
+  }
+  if (/\b(food|recipe|restaurant|cooking|chef|meal|pizza|burger|dessert|coffee|drink|cuisine)\b/.test(value)) {
+    return "🍽️";
+  }
+  if (/\b(travel|tourism|vacation|destination|beach|mountain|hotel|flight|adventure)\b/.test(value)) {
+    return "✈️";
+  }
+  if (/\b(fitness|gym|workout|exercise|health|running|yoga|sport|athlete)\b/.test(value)) {
+    return "💪";
+  }
+  if (/\b(nature|forest|tree|flower|garden|landscape|wildlife|ocean|sunset|sunrise)\b/.test(value)) {
+    return "🌿";
+  }
+  if (/\b(fashion|clothing|style|dress|beauty|makeup|jewelry|outfit)\b/.test(value)) {
+    return "✨";
+  }
+  if (/\b(business|startup|finance|marketing|sales|career|leadership|office|professional)\b/.test(value)) {
+    return "💡";
+  }
+  if (/\b(education|learning|course|student|school|college|study|training)\b/.test(value)) {
+    return "📚";
+  }
+  if (/\b(product|ecommerce|shopping|store|brand|retail)\b/.test(value)) {
+    return "🛍️";
+  }
+  if (/\b(art|creative|design|illustration|photography|visual)\b/.test(value)) {
+    return "🎨";
+  }
+
+  return "✨";
+}
+
+function ensureSocialContentIcon(text: string, icon: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return icon;
+
+  // Keep an emoji already supplied by the vision model.
+  if (/[\u{1F300}-\u{1FAFF}]/u.test(trimmed)) {
+    return trimmed;
+  }
+
+  return `${icon} ${trimmed}`;
+}
+
 function ImageGenerator({
   selectedApiKeys,
   selectedApiServices,
@@ -3520,7 +3569,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened in a new tab. Approve access; the generated image will then continue into Canva automatically.",
+        "Canva authorization opened. After you approve access, Canva will create the editable design from this generated image automatically.",
       );
       return;
     }
@@ -3654,16 +3703,26 @@ const handleOpenGeneratedImageInCanva = async () => {
         typeof data.descriptions === "object"
       ) {
         const platformDefaults: Record<string, { icon: string; tags: string[] }> = {
-          "LinkedIn": { icon: "💼", tags: ["#LinkedIn", "#Professional", "#Innovation"] },
-          "X / Twitter": { icon: "𝕏", tags: ["#Innovation", "#Tech"] },
-          "Facebook": { icon: "f", tags: ["#Community", "#Innovation", "#Technology"] },
-          "Instagram": { icon: "◎", tags: ["#Innovation", "#Technology", "#Creative"] },
+          "LinkedIn": { icon: "✨", tags: [] },
+          "X / Twitter": { icon: "✨", tags: [] },
+          "Facebook": { icon: "✨", tags: [] },
+          "Instagram": { icon: "✨", tags: [] },
         };
         const normalizedDescriptions: Record<string, SocialDescriptionItem> = {};
         Object.entries(data.descriptions as Record<string, any>).forEach(([platform, value]) => {
-          const fallback = platformDefaults[platform] || { icon: "✦", tags: ["#Innovation", "#Technology"] };
+          const fallback = platformDefaults[platform] || { icon: "✨", tags: [] };
           const item = value && typeof value === "object" ? value : {};
-          const content = String(item.text || item.content || "").trim();
+          const rawContent = String(item.text || item.content || "").trim();
+          const rawTags = Array.isArray(item.tags)
+            ? item.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
+            : [];
+          const suppliedIcon = String(item.icon || "").trim();
+          const safeIcon =
+            suppliedIcon && !["💼", "𝕏", "f", "◎", "C"].includes(suppliedIcon)
+              ? suppliedIcon
+              : inferSocialIcon(rawContent, rawTags);
+          const content = ensureSocialContentIcon(rawContent, safeIcon);
+          const safeTags = rawTags.length > 0 ? rawTags : fallback.tags;
           normalizedDescriptions[platform] = {
             text: content,
             character_count: Number(item.character_count || content.length),
@@ -3672,10 +3731,8 @@ const handleOpenGeneratedImageInCanva = async () => {
             target_word_count: Number(item.target_word_count || 0) || undefined,
             minimum_word_count: Number(item.minimum_word_count || 0) || undefined,
             maximum_word_count: Number(item.maximum_word_count || 0) || undefined,
-            icon: String(item.icon || fallback.icon),
-            tags: Array.isArray(item.tags)
-              ? item.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
-              : fallback.tags,
+            icon: safeIcon,
+            tags: safeTags,
           };
         });
         setSocialDescriptions(normalizedDescriptions);
@@ -3754,10 +3811,14 @@ const handleOpenGeneratedImageInCanva = async () => {
               );
 
           if (content) {
+            const legacyTags = (content.match(/#[A-Za-z0-9_]+/g) || [])
+              .map((tag) => tag.trim())
+              .filter(Boolean);
+            const legacyIcon = inferSocialIcon(content, legacyTags);
             parsed[platform] = {
-              text: content,
+              text: ensureSocialContentIcon(content, legacyIcon),
               character_count:
-                content.length,
+                ensureSocialContentIcon(content, legacyIcon).length,
               character_limit:
                 limits[heading].character,
               word_count:
@@ -6111,7 +6172,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       opacity: isCreatingCanvaDesign ? 0.7 : 1,
     }}
   >
-    <span aria-hidden="true" style={{ fontWeight: 900 }}>C</span>
+    <span aria-hidden="true" style={{ fontSize: "17px", lineHeight: 1 }}>🎨</span>
     {isCreatingCanvaDesign ? "Opening Canva..." : "Edit in Canva"}
   </button>
   <span style={{ fontSize: "11px", opacity: 0.62 }}>
