@@ -4029,32 +4029,99 @@ except Exception as exc:
 
 @app.post("/api/images/generate")
 async def generate_output_image(
-source_type: str = Form(...),
-source: str = Form(...),
-filename: str = Form("reference.png"),
-content_type: str = Form(""),
-prompt: str = Form(...),
-template_json: str = Form("{}"),
+    source_type: str = Form(...),
+    source: str = Form(...),
+    filename: str = Form("reference.png"),
+    content_type: str = Form(""),
+    prompt: str = Form(...),
+    template_json: str = Form("{}"),
 ):
-if not prompt.strip():
-raise HTTPException(
-status_code=400,
-detail="Enter a content prompt before generating the output image.",
-)
+    if not prompt.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a content prompt before generating the output image.",
+        )
 
-# Require at least one selected image-capable key, then try selected keys
-# in order. A failed/limited key must not block another selected key.
-reference_path, _ = _resolve_generation_reference(
-    source_type,
-    source,
-    filename,
-    content_type,
-)
+    # Require at least one selected image-capable key, then try selected keys
+    # in order. A failed/limited key must not block another selected key.
+    _require_pipeline_key()
 
-instruction = _generation_instruction(
-    prompt,
-    template_json,
-)   
+    reference_path, _ = _resolve_generation_reference(
+        source_type,
+        source,
+        filename,
+        content_type,
+    )
+
+    instruction = _generation_instruction(
+        prompt,
+        template_json,
+    )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    errors = []
+    image_bytes = None
+    image_model = ""
+    key_id = ""
+    item = None
+
+    for candidate_id, candidate_item in selected_candidates:
+        try:
+            candidate_bytes, candidate_model = _pipeline_image(
+                candidate_item,
+                reference_path,
+                instruction,
+            )
+
+            image_bytes = candidate_bytes
+            image_model = candidate_model
+            key_id = candidate_id
+            item = candidate_item
+
+            API_KEY_STATE["pipeline_key_id"] = candidate_id
+            break
+
+        except Exception as exc:
+            errors.append(
+                f"{candidate_item.get('display_name', candidate_id)}: {exc}"
+            )
+
+    if image_bytes is None or item is None:
+        detail = (
+            " | ".join(errors)
+            if errors
+            else "No selected API key can generate images."
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Image generation failed for all selected image-capable API keys. "
+                f"{detail}"
+            ),
+        )
+
+    output_name = _safe_output_name(filename)
+    (IMAGE_OUTPUT_DIR / output_name).write_bytes(image_bytes)
+
+    return {
+        "success": True,
+        "image_url": f"/api/images/output/{quote(output_name)}",
+        "filename": output_name,
+        "model": image_model,
+        "provider": item.get("display_name", "Selected API"),
+        "api_id": key_id,
+        "pipeline_api_id": key_id,
+        "selected_api_count": len(
+            API_KEY_STATE.get("selected_ids", [])
+        ),
+        "changes": {},
+    } 
 
 @app.post("/api/social-media/generate")
 async def generate_social_media_description(
