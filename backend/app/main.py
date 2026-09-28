@@ -125,14 +125,12 @@ CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 DRIVE_CONFIG_FILE = BASE_DIR / "drive_config.json"
 
-# Railway/deployment support:
-# Local development can continue using backend/credentials.json and
-# backend/token.json. Railway can securely provide the same OAuth JSON
-# documents through environment variables instead of committing secrets.
-DRIVE_CREDENTIALS_ENV = "GOOGLE_DRIVE_CREDENTIALS_JSON_B64"
-DRIVE_TOKEN_ENV = "GOOGLE_DRIVE_TOKEN_JSON_B64"
-DRIVE_CREDENTIALS_ENV_LEGACY = "GOOGLE_OAUTH_CREDENTIALS_JSON"
-DRIVE_TOKEN_ENV_LEGACY = "GOOGLE_OAUTH_TOKEN_JSON"
+# Railway deployment support:
+# Use the Google OAuth variables configured in Railway.
+# Local development continues to use credentials.json/token.json.
+DRIVE_CREDENTIALS_ENV = "GOOGLE_OAUTH_CREDENTIALS_JSON"
+DRIVE_TOKEN_ENV = "GOOGLE_OAUTH_TOKEN_JSON"
+
 DRIVE_FOLDER_ENV = "GOOGLE_DRIVE_FOLDER_ID"
 DRIVE_OUTPUT_FOLDER_ENV = "GOOGLE_DRIVE_OUTPUT_FOLDER_ID"
 
