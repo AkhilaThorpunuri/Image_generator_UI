@@ -1,3 +1,4 @@
+App.tsx
 
 import {
   useEffect,
@@ -19,7 +20,7 @@ import type {
 } from "./services/templateService";
 
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
+const API_BASE_URL = "http://localhost:8000";
 
 
 function resolveApiUrl(url: string): string {
@@ -1527,12 +1528,6 @@ function ImageGenerator({
     text: string;
     character_count: number;
     character_limit: number;
-    word_count?: number;
-    target_word_count?: number;
-    minimum_word_count?: number;
-    maximum_word_count?: number;
-    icon?: string;
-    tags?: string[];
   };
 
   const [socialDescriptions, setSocialDescriptions] =
@@ -3470,13 +3465,15 @@ const handleOpenGeneratedImageInCanva = async () => {
 
     if (!status?.configured) {
       throw new Error(
-        "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
+        "Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and CANVA_CONNECT_REDIRECT_URI in the backend environment.",
       );
     }
 
     if (!status?.authenticated) {
       const authResponse = await fetch(
-        `${API_BASE_URL}/api/canva/connect/oauth/start?filename=${encodeURIComponent(generatedImageFilename)}`,
+        `${API_BASE_URL}/api/canva/connect/oauth/start?filename=${encodeURIComponent(
+          generatedImageFilename,
+        )}`,
         { credentials: "include" },
       );
       const authData = await authResponse.json().catch(() => null);
@@ -3503,7 +3500,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened. Approve access and the generated image will open in Canva automatically.",
+        "Canva authorization opened in a new tab. Approve access. After authorization, the generated image will open in Canva automatically.",
       );
       return;
     }
@@ -3717,28 +3714,12 @@ const handleOpenGeneratedImageInCanva = async () => {
               );
 
           if (content) {
-            const fallbackIcon =
-              platform === "LinkedIn"
-                ? "💼"
-                : platform === "X / Twitter"
-                  ? "𝕏"
-                  : platform === "Facebook"
-                    ? "📘"
-                    : "📸";
-
-            const fallbackTags = [
-              "#Technology",
-              "#Innovation",
-              "#CreativeContent",
-            ];
-
             parsed[platform] = {
               text: content,
-              character_count: content.length,
-              character_limit: limits[heading],
-              word_count: content.split(/\s+/).filter(Boolean).length,
-              icon: fallbackIcon,
-              tags: fallbackTags,
+              character_count:
+                content.length,
+              character_limit:
+                limits[heading],
             };
           }
         });
@@ -6059,12 +6040,10 @@ const handleOpenGeneratedImageInCanva = async () => {
     className="secondary-button"
     onClick={handleOpenGeneratedImageInCanva}
     disabled={isCreatingCanvaDesign}
-    aria-label="Edit generated image in Canva"
   >
-    <span aria-hidden="true" style={{ marginRight: "7px" }}>🎨</span>
     {isCreatingCanvaDesign
       ? "Opening Canva..."
-      : "Edit in Canva"}
+      : "🎨 Edit in Canva"}
   </button>
 </div>
 
@@ -6254,17 +6233,10 @@ const handleOpenGeneratedImageInCanva = async () => {
               fontSize: "11px",
             }}
           >
-            <strong>
-              <span aria-hidden="true" style={{ marginRight: "6px" }}>
-                {item.icon || "✦"}
-              </span>
-              {platform}
-            </strong>
+            <strong>{platform}</strong>
             <span style={{ opacity: 0.65 }}>
-              {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
-              {item.maximum_word_count ? ` / max ${item.maximum_word_count}` : ""}
-              {" · "}
-              {item.character_count} / {item.character_limit}
+              {item.character_count} /{" "}
+              {item.character_limit}
             </span>
           </div>
 
@@ -6278,28 +6250,6 @@ const handleOpenGeneratedImageInCanva = async () => {
           >
             {item.text}
           </p>
-          {item.tags && item.tags.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                gap: "5px",
-                flexWrap: "wrap",
-                marginTop: "7px",
-              }}
-            >
-              {item.tags.map((tag) => (
-                <span
-                  key={tag}
-                  style={{
-                    fontSize: "11px",
-                    opacity: 0.78,
-                  }}
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       ))}
     </div>
@@ -6620,22 +6570,15 @@ const handleOpenGeneratedImageInCanva = async () => {
                       gap: "8px",
                     }}
                   >
-                    <strong>
-                      <span aria-hidden="true" style={{ marginRight: "6px" }}>
-                        {item.icon || "✦"}
-                      </span>
-                      {platform}
-                    </strong>
+                    <strong>{platform}</strong>
                     <span
                       style={{
                         opacity: 0.65,
                         fontSize: "12px",
                       }}
                     >
-                      {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
-                      {item.maximum_word_count ? ` / max ${item.maximum_word_count}` : ""}
-                      {" · "}
-                      {item.character_count} / {item.character_limit}
+                      {item.character_count} /{" "}
+                      {item.character_limit}
                     </span>
                   </div>
 
@@ -6648,28 +6591,6 @@ const handleOpenGeneratedImageInCanva = async () => {
                   >
                     {item.text}
                   </p>
-                  {item.tags && item.tags.length > 0 && (
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: "6px",
-                        flexWrap: "wrap",
-                        marginTop: "8px",
-                      }}
-                    >
-                      {item.tags.map((tag) => (
-                        <span
-                          key={tag}
-                          style={{
-                            fontSize: "11px",
-                            opacity: 0.78,
-                          }}
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </article>
               ))}
             </div>
