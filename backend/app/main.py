@@ -3261,40 +3261,58 @@ async def generate_social_media_description(
             detail="Select at least one API key before generating a description.",
         )
 
-    # These are deliberately word-oriented targets. X/Twitter also has a
-    # strict character ceiling, so its word target is kept lower.
+    # Word-oriented targets plus presentation metadata. The model returns JSON so
+    # the UI can render the icon, content, and tags separately.
     targets = {
-        "[LINKEDIN]": {"label": "LinkedIn", "target": 180, "minimum": 165, "maximum": 195, "characters": 3000},
-        "[X / TWITTER]": {"label": "X / Twitter", "target": 35, "minimum": 30, "maximum": 40, "characters": 280},
-        "[FACEBOOK]": {"label": "Facebook", "target": 160, "minimum": 145, "maximum": 175, "characters": 10000},
-        "[INSTAGRAM]": {"label": "Instagram", "target": 150, "minimum": 135, "maximum": 165, "characters": 2200},
+        "LinkedIn": {"heading": "[LINKEDIN]", "icon": "💼", "target": 180, "minimum": 165, "maximum": 195, "characters": 3000},
+        "X / Twitter": {"heading": "[X / TWITTER]", "icon": "𝕏", "target": 35, "minimum": 30, "maximum": 40, "characters": 280},
+        "Facebook": {"heading": "[FACEBOOK]", "icon": "f", "target": 160, "minimum": 145, "maximum": 175, "characters": 10000},
+        "Instagram": {"heading": "[INSTAGRAM]", "icon": "◎", "target": 150, "minimum": 135, "maximum": 165, "characters": 2200},
     }
 
-    headings = list(targets.keys())
+    def normalize_tags(value, fallback_text: str = "") -> list[str]:
+        if isinstance(value, list):
+            tags = [str(item).strip() for item in value if str(item).strip()]
+        elif isinstance(value, str):
+            tags = re.findall(r"#[A-Za-z0-9_]+", value)
+        else:
+            tags = []
+        if not tags:
+            tags = re.findall(r"#[A-Za-z0-9_]+", fallback_text)
+        result = []
+        seen = set()
+        for tag in tags:
+            tag = tag if tag.startswith("#") else f"#{tag}"
+            key = tag.lower()
+            if key not in seen:
+                result.append(tag)
+                seen.add(key)
+        return result[:8]
 
-    def parse_sections(raw: str) -> dict:
-        parsed = {}
-        raw = str(raw or "").strip()
-        for index, heading in enumerate(headings):
-            start_index = raw.find(heading)
-            if start_index < 0:
+    def normalize_social_json(raw: str) -> dict:
+        parsed_json = _extract_json_object(raw)
+        source = parsed_json.get("platforms") if isinstance(parsed_json.get("platforms"), dict) else parsed_json
+        if not isinstance(source, dict):
+            raise RuntimeError("The selected API returned an invalid social-media JSON object.")
+
+        aliases = {
+            "linkedin": "LinkedIn",
+            "x": "X / Twitter",
+            "twitter": "X / Twitter",
+            "x / twitter": "X / Twitter",
+            "facebook": "Facebook",
+            "instagram": "Instagram",
+        }
+        normalized = {}
+        for raw_key, raw_value in source.items():
+            label = aliases.get(str(raw_key).strip().lower())
+            if not label or not isinstance(raw_value, dict):
                 continue
-            content_start = start_index + len(heading)
-            next_positions = [
-                raw.find(next_heading, content_start)
-                for next_heading in headings[index + 1:]
-            ]
-            next_positions = [position for position in next_positions if position >= 0]
-            end_index = min(next_positions) if next_positions else len(raw)
-            content = raw[content_start:end_index].strip()
+            info = targets[label]
+            content = str(raw_value.get("content") or raw_value.get("text") or "").strip()
             if not content:
                 continue
-            info = targets[heading]
-            # Remove accidental platform labels/code fences without changing
-            # the user's generated wording.
-            content = re.sub(r"^```(?:text|markdown)?\s*", "", content, flags=re.I)
-            content = re.sub(r"\s*```$", "", content).strip()
-            parsed[info["label"]] = {
+            normalized[label] = {
                 "text": content,
                 "character_count": len(content),
                 "character_limit": info["characters"],
@@ -3302,19 +3320,62 @@ async def generate_social_media_description(
                 "target_word_count": info["target"],
                 "minimum_word_count": info["minimum"],
                 "maximum_word_count": info["maximum"],
+                "icon": str(raw_value.get("icon") or info["icon"]).strip() or info["icon"],
+                "tags": normalize_tags(raw_value.get("tags"), content),
             }
+
+        if len(normalized) != 4:
+            raise RuntimeError("The selected API did not return all four social-media platforms.")
+        return normalized
+
+    def parse_legacy_sections(raw: str) -> dict:
+        parsed = {}
+        headings = [targets[label]["heading"] for label in targets]
+        for index, heading in enumerate(headings):
+            start_index = raw.find(heading)
+            if start_index < 0:
+                continue
+            content_start = start_index + len(heading)
+            next_positions = [raw.find(next_heading, content_start) for next_heading in headings[index + 1:]]
+            next_positions = [position for position in next_positions if position >= 0]
+            end_index = min(next_positions) if next_positions else len(raw)
+            content = re.sub(r"^```(?:text|markdown)?\s*", "", raw[content_start:end_index].strip(), flags=re.I)
+            content = re.sub(r"\s*```$", "", content).strip()
+            if not content:
+                continue
+            label = next(name for name, info in targets.items() if info["heading"] == heading)
+            info = targets[label]
+            parsed[label] = {
+                "text": content,
+                "character_count": len(content),
+                "character_limit": info["characters"],
+                "word_count": len(content.split()),
+                "target_word_count": info["target"],
+                "minimum_word_count": info["minimum"],
+                "maximum_word_count": info["maximum"],
+                "icon": info["icon"],
+                "tags": normalize_tags(None, content),
+            }
+        if len(parsed) != 4:
+            raise RuntimeError("The selected API returned no recognizable social-media descriptions.")
         return parsed
+
+    def parse_sections(raw: str) -> dict:
+        try:
+            return normalize_social_json(raw)
+        except Exception:
+            return parse_legacy_sections(raw)
 
     def score(parsed: dict) -> float:
         if len(parsed) != 4:
             return float("inf")
         total = 0.0
-        for heading, info in targets.items():
-            item = parsed.get(info["label"])
+        for label, info in targets.items():
+            item = parsed.get(label)
             if not item:
                 return float("inf")
-            words = item["word_count"]
-            chars = item["character_count"]
+            words = int(item.get("word_count") or 0)
+            chars = int(item.get("character_count") or 0)
             total += abs(words - info["target"])
             if words < info["minimum"]:
                 total += (info["minimum"] - words) * 4
@@ -3324,35 +3385,48 @@ async def generate_social_media_description(
                 total += (chars - info["characters"]) * 10
         return total
 
+    def serialize_social_file(parsed: dict) -> str:
+        parts = []
+        for label, info in targets.items():
+            item = parsed[label]
+            parts.extend([
+                info["heading"],
+                f"Icon: {item.get('icon') or info['icon']}",
+                "Tags: " + " ".join(normalize_tags(item.get("tags"), item.get("text", ""))),
+                "",
+                item["text"],
+                "",
+            ])
+        return "\n".join(parts).strip() + "\n"
+
     base_instruction = f"""
 Analyze the supplied generated image and write four platform-specific social-media descriptions.
 
 The goal is to produce descriptions CLOSE TO the requested word counts, not short summaries.
-Do not stop early. Use the visible image and the user's request to provide useful, complete copy.
-Do not invent facts that cannot be seen or reasonably inferred from the image.
+Use the visible image and the user's request. Do not invent facts that cannot be seen or reasonably inferred.
 
-Return EXACTLY these four headings and nothing else:
+Return ONLY valid JSON. Do not use Markdown or code fences. Use this exact shape:
+{{
+  "LinkedIn": {{"icon": "💼", "content": "...", "tags": ["#tag1", "#tag2", "#tag3"]}},
+  "X / Twitter": {{"icon": "𝕏", "content": "...", "tags": ["#tag1", "#tag2"]}},
+  "Facebook": {{"icon": "f", "content": "...", "tags": ["#tag1", "#tag2", "#tag3"]}},
+  "Instagram": {{"icon": "◎", "content": "...", "tags": ["#tag1", "#tag2", "#tag3", "#tag4"]}}
+}}
 
-[LINKEDIN]
-Target about 180 words. Acceptable range: 165-195 words. Professional, informative, and engaging.
-
-[X / TWITTER]
-Target about 35 words. Acceptable range: 30-40 words AND keep the complete section at or below 280 characters.
-
-[FACEBOOK]
-Target about 160 words. Acceptable range: 145-175 words. Engaging and conversational.
-
-[INSTAGRAM]
-Target about 150 words. Acceptable range: 135-165 words. Engaging, descriptive, and include relevant hashtags within the target where appropriate.
+Requirements:
+- LinkedIn: about 180 words; acceptable range 165-195. Professional, informative, and engaging. Provide 3-6 relevant tags.
+- X / Twitter: about 35 words; acceptable range 30-40 words; the content itself must stay at or below 280 characters. Provide 2-4 relevant tags.
+- Facebook: about 160 words; acceptable range 145-175. Engaging and conversational. Provide 3-6 relevant tags.
+- Instagram: about 150 words; acceptable range 135-165. Engaging and descriptive. Provide 5-8 relevant tags.
+- Keep tags in the separate tags array; do not count tags toward the content word target.
 
 User's content request:
 {prompt.strip()}
 """.strip()
 
     revision_suffix = """
-
 IMPORTANT REVISION RULE:
-Your previous response was too short or too far from the requested word targets. Regenerate ALL FOUR sections now. Aim for the middle of each requested range. Do not summarize in only a few sentences. Return the complete four sections again.
+The previous response was too short or outside the requested word targets. Regenerate ALL FOUR JSON objects. Aim for the middle of each range. Do not return short summaries. Keep tags separate from content and keep the exact JSON shape.
 """
 
     errors = []
@@ -3403,22 +3477,23 @@ Your previous response was too short or too far from the requested word targets.
     key_id, pipeline_item, raw, descriptions = best_result
     description_name = f"{Path(safe_name).stem}_description.txt"
     description_path = IMAGE_OUTPUT_DIR / description_name
-    description_path.write_text(raw, encoding="utf-8")
+    formatted_social_text = serialize_social_file(descriptions)
+    description_path.write_text(formatted_social_text, encoding="utf-8")
     API_KEY_STATE["pipeline_key_id"] = key_id
 
     return {
         "success": True,
         "filename": safe_name,
-        "content": raw,
-        "description": raw,
+        "content": formatted_social_text,
+        "description": formatted_social_text,
         "descriptions": descriptions,
         "social_media_filename": description_name,
         "social_media_file_url": f"/api/social-media/output/{quote(description_name)}",
         "provider": pipeline_item.get("display_name", "Selected API"),
         "model": _provider_text_model(pipeline_item),
         "api_id": key_id,
-        "word_count": len(raw.split()),
-        "message": "Social-media descriptions generated close to their requested word counts.",
+        "word_count": sum(int(item.get("word_count") or 0) for item in descriptions.values()),
+        "message": "Social-media descriptions generated close to their requested word counts with icons and tags.",
     }
 
 @app.get("/api/social-media/output/{filename}")
