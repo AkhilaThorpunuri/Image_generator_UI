@@ -4285,6 +4285,7 @@ app = CORSMiddleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+         "https://frontend-production-14d5.up.railway.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
