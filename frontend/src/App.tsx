@@ -3468,8 +3468,16 @@ const handleOpenGeneratedImageInCanva = async () => {
     }
 
     if (!status?.authenticated) {
-      const authResponse = await fetch(
+      const oauthStartUrl = new URL(
         `${API_BASE_URL}/api/canva/connect/oauth/start`,
+      );
+      oauthStartUrl.searchParams.set(
+        "filename",
+        generatedImageFilename,
+      );
+
+      const authResponse = await fetch(
+        oauthStartUrl.toString(),
         { credentials: "include" },
       );
       const authData = await authResponse.json().catch(() => null);
@@ -3544,7 +3552,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     setCanvaMessage(
       String(
         data.message ||
-          "Editable Canva design created successfully.",
+          "Generated image opened in Canva as one editable image.",
       ),
     );
 
@@ -6039,7 +6047,7 @@ const handleOpenGeneratedImageInCanva = async () => {
   >
     {isCreatingCanvaDesign
       ? "Opening Canva..."
-      : "Open / Edit in Canva"}
+      : "Edit in Canva"}
   </button>
 </div>
 
