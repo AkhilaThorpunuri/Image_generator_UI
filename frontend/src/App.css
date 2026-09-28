@@ -5436,3 +5436,19 @@ textarea:focus-visible {
   .social-description-actions .primary-button,.social-description-actions .secondary-button { width:100%; }
   .social-description-modal { width:calc(100vw - 20px); max-height:88vh; }
 }
+.Open / Edit in Canva {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 16px;
+  border: 2px solid #635bff !important;
+  border-radius: 10px;
+  color: #ffffff !important;
+  background: #635bff !important;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  opacity: 1 !important;
+  visibility: visible !important;
+}
