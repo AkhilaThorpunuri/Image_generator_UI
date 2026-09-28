@@ -6042,7 +6042,6 @@ const handleOpenGeneratedImageInCanva = async () => {
     {isCreatingCanvaDesign
       ? "Opening Canva..."
       : "🎨 Edit in Canva"}
-    {/* Canva edit action */}
   </button>
 </div>
 
