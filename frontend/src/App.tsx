@@ -1526,6 +1526,7 @@ function ImageGenerator({
     text: string;
     character_count: number;
     character_limit: number;
+    word_count?: number;
   };
 
   const [socialDescriptions, setSocialDescriptions] =
@@ -3504,7 +3505,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened in a new tab. Approve access, return here, and click Open / Edit in Canva again.",
+        "Canva authorization opened in a new tab. After you approve access, Canva will open the generated image automatically.",
       );
       return;
     }
@@ -3552,7 +3553,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     setCanvaMessage(
       String(
         data.message ||
-          "Generated image opened in Canva as one editable image.",
+          "Editable Canva design created successfully.",
       ),
     );
 
@@ -3720,10 +3721,9 @@ const handleOpenGeneratedImageInCanva = async () => {
           if (content) {
             parsed[platform] = {
               text: content,
-              character_count:
-                content.length,
-              character_limit:
-                limits[heading],
+              character_count: content.length,
+              character_limit: limits[heading],
+              word_count: content.split(/\s+/).filter(Boolean).length,
             };
           }
         });
@@ -6030,21 +6030,41 @@ const handleOpenGeneratedImageInCanva = async () => {
 
                 )}
 
-                
+
 <div
   style={{
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
     marginTop: "16px",
+    marginBottom: "4px",
+    width: "100%",
   }}
 >
   <button
     type="button"
-    className="secondary-button"
     onClick={handleOpenGeneratedImageInCanva}
-    disabled={isCreatingCanvaDesign}
+    disabled={!generatedImageFilename || isCreatingCanvaDesign}
+    aria-label="Edit generated image in Canva"
+    style={{
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "8px",
+      minHeight: "42px",
+      padding: "10px 18px",
+      border: "0",
+      borderRadius: "10px",
+      fontWeight: 800,
+      fontSize: "14px",
+      color: "#ffffff",
+      background: "linear-gradient(135deg, #7c3aed, #06b6d4)",
+      cursor: isCreatingCanvaDesign ? "wait" : "pointer",
+      opacity: !generatedImageFilename ? 0.55 : 1,
+      boxShadow: "0 8px 20px rgba(124, 58, 237, 0.22)",
+    }}
   >
+    <span aria-hidden="true">✎</span>
     {isCreatingCanvaDesign
       ? "Opening Canva..."
       : "Edit in Canva"}
@@ -6127,6 +6147,17 @@ const handleOpenGeneratedImageInCanva = async () => {
       }}
     >
       Generate platform-specific descriptions from the final generated image.
+      The system targets longer, platform-appropriate word counts instead of
+      returning very short captions.
+    </p>
+    <p
+      style={{
+        margin: "7px 0 0",
+        fontSize: "11px",
+        opacity: 0.62,
+      }}
+    >
+      Target length: LinkedIn ~150 words · X ~35 words · Facebook ~140 words · Instagram ~120 words.
     </p>
   </div>
 
@@ -6239,8 +6270,7 @@ const handleOpenGeneratedImageInCanva = async () => {
           >
             <strong>{platform}</strong>
             <span style={{ opacity: 0.65 }}>
-              {item.character_count} /{" "}
-              {item.character_limit}
+              {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words · {item.character_count} / {item.character_limit} chars
             </span>
           </div>
 
