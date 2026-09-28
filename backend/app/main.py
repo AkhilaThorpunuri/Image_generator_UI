@@ -6,7 +6,6 @@ import os
 import re
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-from app.services.canva_mcp_service import canva_mcp_service
 
 from fastapi import (
     FastAPI,
@@ -25,7 +24,6 @@ from pydantic import BaseModel
 from fastapi.responses import (
     FileResponse,
     StreamingResponse,
-    HTMLResponse,
 )
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -126,11 +124,16 @@ TOKEN_FILE = BASE_DIR / "token.json"
 DRIVE_CONFIG_FILE = BASE_DIR / "drive_config.json"
 
 # Railway deployment support:
-# Use the Google OAuth variables configured in Railway.
-# Local development continues to use credentials.json/token.json.
+# Keep the existing local credentials.json/token.json flow, but also allow
+# the same OAuth files to be supplied securely through environment variables.
+# This avoids committing Google OAuth secrets to Git.
+# Railway service variables (current deployment names).
+# These contain the OAuth JSON documents as plain JSON strings.
 DRIVE_CREDENTIALS_ENV = "GOOGLE_OAUTH_CREDENTIALS_JSON"
 DRIVE_TOKEN_ENV = "GOOGLE_OAUTH_TOKEN_JSON"
-
+# Backward-compatible support for older deployments that stored base64 JSON.
+DRIVE_CREDENTIALS_ENV_LEGACY = "GOOGLE_DRIVE_CREDENTIALS_JSON_B64"
+DRIVE_TOKEN_ENV_LEGACY = "GOOGLE_DRIVE_TOKEN_JSON_B64"
 DRIVE_FOLDER_ENV = "GOOGLE_DRIVE_FOLDER_ID"
 DRIVE_OUTPUT_FOLDER_ENV = "GOOGLE_DRIVE_OUTPUT_FOLDER_ID"
 
@@ -141,166 +144,10 @@ API_KEY_STATE = {
     "config": {},
     "drive_folder_id": "",
     "drive_folder_name": "",
-    "drive_folders": [],
-    "drive_output_folders": [],
     "drive_output_folder_id": "",
     "drive_output_folder_name": "outputs",
     "gemini_model": "gemini-3.5-flash-lite",
 }
-
-
-def extract_api_key_icons(file_bytes: bytes, filename: str) -> dict[str, str]:
-    """Return leading icon/symbol text for each API key in a text config file."""
-    if Path(filename).suffix.lower() == ".json":
-        return {}
-
-    text = file_bytes.decode("utf-8-sig", errors="replace")
-    icons: dict[str, str] = {}
-    occurrences: dict[str, int] = {}
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip().rstrip(",")
-        if not line or line.startswith("#") or line.startswith("//"):
-            continue
-        if "=" in line:
-            left = line.split("=", 1)[0].strip()
-        elif ":" in line:
-            left = line.split(":", 1)[0].strip()
-        else:
-            continue
-
-        left = left.strip("\"'").strip()
-        match = re.search(r"([A-Za-z][A-Za-z0-9_.\-\s]*)\s*$", left)
-        if not match:
-            continue
-
-        raw_name = match.group(1).strip()
-        normalized = normalize_key_name(raw_name)
-        base = re.sub(r"_\d+$", "", normalized)
-        occurrence = occurrences.get(base, 0) + 1
-        occurrences[base] = occurrence
-        key_id = base if occurrence == 1 else f"{base}_{occurrence}"
-
-        prefix = left[:match.start()].strip()
-        prefix = prefix.strip("\"' -|:")
-        if prefix:
-            icons[key_id] = prefix
-
-    return icons
-
-
-def extract_drive_folder_configs(values: dict[str, str]) -> list[dict[str, str]]:
-    """Extract one or more Google Drive reference/output folders from the uploaded config."""
-    configs: list[dict[str, str]] = []
-
-    def add(folder_id: str = "", folder_name: str = "") -> None:
-        normalized = normalize_drive_folder_id(str(folder_id or ""))
-        name = str(folder_name or "").strip()
-        if not normalized and not name:
-            return
-        if any(c.get("id") == normalized and c.get("name") == name for c in configs):
-            return
-        configs.append({"id": normalized, "name": name})
-
-    # Preferred compact form: GOOGLE_DRIVE_FOLDER_IDS=id1,id2,...
-    for key in ("GOOGLE_DRIVE_FOLDER_IDS", "GDRIVE_FOLDER_IDS", "DRIVE_FOLDER_IDS"):
-        raw = find_config_value(values, (key,))
-        if raw:
-            for value in re.split(r"[,;\n]+", str(raw)):
-                add(folder_id=value.strip())
-
-    # Numbered forms: GOOGLE_DRIVE_FOLDER_ID, _2, _3 ...
-    id_items: list[tuple[int, str, str]] = []
-    name_items: dict[int, str] = {}
-    for key, value in values.items():
-        normalized_key = normalize_key_name(key)
-        id_match = re.match(r"^(?:GOOGLE|GDRIVE|DRIVE)_DRIVE?_?FOLDER_ID(?:_(\d+))?$", normalized_key)
-        if not id_match:
-            id_match = re.match(r"^(?:GOOGLE_DRIVE|GDRIVE|DRIVE)_FOLDER_ID(?:_(\d+))?$", normalized_key)
-        if id_match:
-            index = int(id_match.group(1) or "1")
-            id_items.append((index, str(value or ""), ""))
-            continue
-        name_match = re.match(r"^(?:GOOGLE_DRIVE|GDRIVE|DRIVE)_FOLDER_NAME(?:_(\d+))?$", normalized_key)
-        if name_match:
-            name_items[int(name_match.group(1) or "1")] = str(value or "").strip()
-
-    for index, folder_id, _ in sorted(id_items, key=lambda item: item[0]):
-        add(folder_id=folder_id, folder_name=name_items.get(index, ""))
-
-    # Backward-compatible single-folder aliases.
-    if not configs:
-        add(
-            folder_id=find_config_value(values, (
-                "GOOGLE_DRIVE_FOLDER_ID", "GDRIVE_FOLDER_ID", "DRIVE_FOLDER_ID",
-                "GOOGLE_DRIVE_FOLDER_URL", "GDRIVE_FOLDER_URL", "DRIVE_FOLDER_URL",
-            )),
-            folder_name=find_config_value(values, (
-                "GOOGLE_DRIVE_FOLDER_NAME", "GDRIVE_FOLDER_NAME", "GOOGLE_DRIVE_NAME",
-                "GDRIVE_NAME", "DRIVE_FOLDER_NAME", "DRIVE_NAME",
-            )),
-        )
-
-    return configs
-
-
-def extract_drive_output_folder_configs(values: dict[str, str]) -> list[dict[str, str]]:
-    """Extract dedicated Google Drive output folders from the uploaded config.
-
-    Supported examples:
-      GDRIVE_OUTPUT_FOLDER_ID_1=...
-      GDRIVE_OUTPUT_FOLDER_ID_2=...
-      GOOGLE_DRIVE_OUTPUT_FOLDER_ID_1=...
-      GDRIVE_OUTPUT_FOLDER_IDS=id1,id2
-    Optional matching names are supported with *_NAME_1, *_NAME_2, etc.
-    """
-    configs: list[dict[str, str]] = []
-
-    def add(folder_id: str = "", folder_name: str = "") -> None:
-        normalized = normalize_drive_folder_id(str(folder_id or ""))
-        name = str(folder_name or "").strip()
-        if not normalized and not name:
-            return
-        if any(c.get("id") == normalized for c in configs):
-            return
-        configs.append({"id": normalized, "name": name})
-
-    # Compact form: GDRIVE_OUTPUT_FOLDER_IDS=id1,id2,...
-    for key in (
-        "GDRIVE_OUTPUT_FOLDER_IDS",
-        "GOOGLE_DRIVE_OUTPUT_FOLDER_IDS",
-        "DRIVE_OUTPUT_FOLDER_IDS",
-    ):
-        raw = find_config_value(values, (key,))
-        if raw:
-            for value in re.split(r"[,;\n]+", str(raw)):
-                add(folder_id=value.strip())
-
-    id_items: list[tuple[int, str]] = []
-    name_items: dict[int, str] = {}
-    for key, value in values.items():
-        normalized_key = normalize_key_name(key)
-
-        id_match = re.match(
-            r"^(?:GOOGLE_DRIVE|GDRIVE|DRIVE)_OUTPUT_FOLDER_ID(?:_(\d+))?$",
-            normalized_key,
-        )
-        if id_match:
-            index = int(id_match.group(1) or "1")
-            id_items.append((index, str(value or "")))
-            continue
-
-        name_match = re.match(
-            r"^(?:GOOGLE_DRIVE|GDRIVE|DRIVE)_OUTPUT_FOLDER_NAME(?:_(\d+))?$",
-            normalized_key,
-        )
-        if name_match:
-            name_items[int(name_match.group(1) or "1")] = str(value or "").strip()
-
-    for index, folder_id in sorted(id_items, key=lambda item: item[0]):
-        add(folder_id=folder_id, folder_name=name_items.get(index, ""))
-
-    return configs
 
 
 def persist_drive_configuration() -> None:
@@ -311,9 +158,6 @@ def persist_drive_configuration() -> None:
     the Drive reference/output folder configuration so a FastAPI restart
     does not make the configured Drive references disappear.
     """
-    folders = API_KEY_STATE.get("drive_folders", [])
-    if not isinstance(folders, list):
-        folders = []
     payload = {
         "drive_folder_id": normalize_drive_folder_id(
             API_KEY_STATE.get("drive_folder_id", "")
@@ -321,8 +165,6 @@ def persist_drive_configuration() -> None:
         "drive_folder_name": str(
             API_KEY_STATE.get("drive_folder_name", "")
         ).strip(),
-        "drive_folders": folders,
-        "drive_output_folders": API_KEY_STATE.get("drive_output_folders", []) if isinstance(API_KEY_STATE.get("drive_output_folders", []), list) else [],
         "drive_output_folder_id": str(
             API_KEY_STATE.get("drive_output_folder_id", "")
         ).strip(),
@@ -351,6 +193,22 @@ def load_persisted_drive_configuration() -> None:
     Google Drive authentication continues to use credentials.json/token.json.
     """
     if not DRIVE_CONFIG_FILE.exists():
+        # Railway provides non-secret Drive folder configuration as service
+        # variables. Keep drive_config.json authoritative when it exists, but
+        # use these variables on a fresh deployment.
+        env_folder_id = normalize_drive_folder_id(
+            str(os.getenv(DRIVE_FOLDER_ENV, "") or "")
+        )
+        env_output_folder_id = str(
+            os.getenv(DRIVE_OUTPUT_FOLDER_ENV, "") or ""
+        ).strip()
+        if env_folder_id:
+            API_KEY_STATE["drive_folder_id"] = env_folder_id
+        if env_output_folder_id:
+            API_KEY_STATE["drive_output_folder_id"] = env_output_folder_id
+        if env_folder_id or env_output_folder_id:
+            API_KEY_STATE["drive_output_folder_name"] = "outputs"
+            print("Loaded Google Drive folder configuration from environment.")
         return
 
     try:
@@ -368,33 +226,9 @@ def load_persisted_drive_configuration() -> None:
             payload.get("drive_folder_name", "") or ""
         ).strip()
 
-        persisted_folders = payload.get("drive_folders", [])
-        if isinstance(persisted_folders, list):
-            API_KEY_STATE["drive_folders"] = [
-                {
-                    "id": normalize_drive_folder_id(str(item.get("id", "") or "")),
-                    "name": str(item.get("name", "") or "").strip(),
-                }
-                for item in persisted_folders
-                if isinstance(item, dict) and (item.get("id") or item.get("name"))
-            ]
-
-        persisted_output_folders = payload.get("drive_output_folders", [])
-        if isinstance(persisted_output_folders, list):
-            API_KEY_STATE["drive_output_folders"] = [
-                {
-                    "id": normalize_drive_folder_id(str(item.get("id", "") or "")),
-                    "name": str(item.get("name", "") or "").strip(),
-                }
-                for item in persisted_output_folders
-                if isinstance(item, dict) and (item.get("id") or item.get("name"))
-            ]
-
         if folder_id or folder_name:
             API_KEY_STATE["drive_folder_id"] = folder_id
             API_KEY_STATE["drive_folder_name"] = folder_name
-            if not API_KEY_STATE.get("drive_folders"):
-                API_KEY_STATE["drive_folders"] = [{"id": folder_id, "name": folder_name}]
 
         if "drive_output_folder_id" in payload:
             API_KEY_STATE["drive_output_folder_id"] = str(
@@ -478,14 +312,11 @@ def logical_api_service(key_name: str) -> str:
         return "openrouter"
     if "OPENAI" in base:
         return "openai"
-    if "CLAUDE" in base or "ANTHROPIC" in base:
-        return "claude"
     return "other"
 
 
-def service_can_generate_image(item: dict) -> bool:
-    """Return the actual image-generation capability of one credential."""
-    return _pipeline_key_is_usable(item, "image")
+def service_can_generate_image(service: str) -> bool:
+    return service != "google-drive"
 
 
 def parse_api_key_text(text: str) -> dict[str, str]:
@@ -507,7 +338,7 @@ def parse_api_key_text(text: str) -> dict[str, str]:
             continue
 
         match = re.match(
-            r'^\s*[^A-Za-z0-9_.\-\s]*["\']?([A-Za-z0-9_.\-\s]+?)["\']?\s*(?:=|:)\s*(.*?)\s*$',
+            r'^\s*["\']?([A-Za-z0-9_.\-\s]+)["\']?\s*(?:=|:)\s*(.*?)\s*$',
             line,
         )
 
@@ -651,94 +482,57 @@ def _selected_pipeline_candidates() -> list[tuple[str, dict]]:
     return candidates
 
 
-def _pipeline_key_is_usable(item: dict, stage: str = "image") -> bool:
-    """Return whether a selected credential can perform the requested stage.
-
-    The old implementation required every provider to support template + prompt +
-    image generation. That made text/vision-only providers unusable even though
-    they can correctly analyze references and create templates/prompts.
-    """
+def _pipeline_key_is_usable(item: dict) -> bool:
+    """A selected credential must be able to generate the final image."""
     if not item or item.get("auth_type") == "oauth":
         return False
     if not str(item.get("value", "")).strip():
         return False
-    service = str(item.get("service", "other")).strip().lower()
+    service = str(item.get("service", "other"))
     if service == "google-drive":
         return False
-
     try:
-        if stage in {"text", "template", "prompt", "tag"}:
-            return bool(_provider_text_model(item))
-
-        if stage == "image":
-            # Built-in image providers have image adapters. Any other provider
-            # is considered image-capable only when its API configuration
-            # explicitly supplies an image model.
-            if service in {"gemini", "openai", "openrouter"}:
-                return bool(_provider_image_model(item))
-            return bool(_provider_base_url(item) and _provider_image_model(item))
-
-        return bool(_provider_text_model(item))
+        return bool(_provider_base_url(item) and _provider_image_model(item))
     except Exception:
         return False
 
 
-def _stage_capability_message(stage: str, selected_ids: list[str]) -> str:
-    """Build a provider-neutral capability error for the current selection."""
-    names = ", ".join(
-        str(API_KEY_STATE.get("keys", {}).get(k, {}).get("display_name", k))
-        for k in selected_ids
-        if k in API_KEY_STATE.get("keys", {})
-    ) or "none"
-
-    if stage == "image":
-        return (
-            "None of the selected API keys can generate the final image. "
-            "Template and prompt generation can use text/vision-capable APIs, "
-            "but final image generation requires an image-capable API. Select an "
-            "image-capable API or configure <PREFIX>_BASE_URL and "
-            "<PREFIX>_IMAGE_MODEL for a custom image provider. "
-            f"Selected: {names}."
-        )
-
-    return (
-        f"None of the selected API keys can perform {stage} generation. "
-        "Select an API key with text/vision capability or configure its "
-        "provider-specific model settings. "
-        f"Selected: {names}."
-    )
-
-
-def _require_pipeline_key(stage: str = "image") -> tuple[str, dict]:
-    """Return the first selected credential capable of the requested stage."""
+def _require_pipeline_key() -> tuple[str, dict]:
+    """Return a selected image-capable credential without template/prompt gates."""
     selected_ids = API_KEY_STATE.get("selected_ids", [])
     if not selected_ids:
         raise HTTPException(
             status_code=400,
-            detail="No API key is selected. Select at least one API key before using the AI pipeline.",
+            detail="No API key is selected. Select at least one API key in the Image Generator header.",
         )
 
-    # Keep the previously chosen key when it still supports this stage.
     pipeline_id = str(API_KEY_STATE.get("pipeline_key_id", "")).strip()
     if pipeline_id:
         item = API_KEY_STATE.get("keys", {}).get(pipeline_id)
-        if pipeline_id in selected_ids and _pipeline_key_is_usable(item, stage):
+        if pipeline_id in selected_ids and _pipeline_key_is_usable(item):
             return pipeline_id, item
+        API_KEY_STATE["pipeline_key_id"] = ""
 
-    for key_id in selected_ids:
-        item = API_KEY_STATE.get("keys", {}).get(key_id)
-        if _pipeline_key_is_usable(item, stage):
-            # The pipeline key is only a convenience cache. It may change between
-            # stages: Claude can be used for text/vision while Gemini/OpenAI is used
-            # for image generation.
-            if stage == "image":
-                API_KEY_STATE["pipeline_key_id"] = key_id
-            return key_id, item
+    candidates = _selected_pipeline_candidates()
+    capable = [(key_id, item) for key_id, item in candidates if _pipeline_key_is_usable(item)]
+    if not capable:
+        names = ", ".join(
+            str(API_KEY_STATE.get("keys", {}).get(k, {}).get("display_name", k))
+            for k in selected_ids
+            if k in API_KEY_STATE.get("keys", {})
+        ) or "none"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"None of the selected API keys can generate the final image. Selected: {names}. "
+                "Template and AI prompt generation are disabled; select an image-capable API key."
+            ),
+        )
 
-    raise HTTPException(
-        status_code=400,
-        detail=_stage_capability_message(stage, selected_ids),
-    )
+    key_id, item = capable[0]
+    API_KEY_STATE["pipeline_key_id"] = key_id
+    return key_id, item
+
 
 def _key_prefix(key_name: str) -> str:
     base = re.sub(r"_\d+$", "", normalize_key_name(key_name))
@@ -786,10 +580,19 @@ def _key_config(item: dict) -> dict:
 
 
 def _provider_base_url(item: dict) -> str:
-    service = str(item.get("service", "other"))
-    if service == "openai": return "https://api.openai.com/v1"
-    if service == "openrouter": return OPENROUTER_BASE_URL
-    if service == "claude": return "https://api.anthropic.com/v1"
+    service = str(item.get("service", "other")).strip().lower()
+
+    # Built-in Gemini adapter does not require a user-supplied base URL.
+    # _gemini_image() uses the official Gemini client directly.
+    if service == "gemini":
+        return "https://generativelanguage.googleapis.com"
+
+    if service == "openai":
+        return "https://api.openai.com/v1"
+
+    if service == "openrouter":
+        return OPENROUTER_BASE_URL
+
     return _key_config(item).get("base_url", "")
 
 
@@ -807,7 +610,6 @@ def _provider_text_model(item: dict) -> str:
     if config.get("text_model"): return config["text_model"]
     if service == "gemini": return str(API_KEY_STATE.get("gemini_model") or "gemini-3.5-flash-lite").strip()
     if service == "openai": return "gpt-5-mini"
-    if service == "claude": return "claude-sonnet-5"
     return ""
 
 
@@ -822,8 +624,6 @@ def _provider_image_model(item: dict) -> str:
     if config.get("image_model"): return config["image_model"]
     if service == "gemini": return "gemini-3.1-flash-image"
     if service == "openai": return "gpt-image-2"
-    # Claude is a vision/text provider here; its API is not an image generator.
-    if service == "claude": return ""
     return ""
 
 
@@ -945,76 +745,6 @@ def _openrouter_prompt(api_key: str, reference_path: Path, model: str | None = N
     return _openrouter_chat_with_image(api_key,reference_path,instruction,model)
 
 
-
-def _claude_request(api_key: str, payload: dict, timeout: int = 180) -> dict:
-    """Call Anthropic's Messages API without exposing the credential to the client."""
-    request = Request(
-        "https://api.anthropic.com/v1/messages",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-    )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        detail = str(exc)
-        if hasattr(exc, "read"):
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-        raise RuntimeError(f"Claude request failed: {detail}") from exc
-
-
-def _claude_chat_with_image(item: dict, path: Path, instruction: str) -> str:
-    """Send a reference image + instruction to Claude's vision-capable Messages API."""
-    image_path = Path(path)
-    mime = get_mime_type(image_path)
-    if mime == "image/gif":
-        from PIL import Image
-        with Image.open(image_path) as image:
-            image.seek(0)
-            frame = image.convert("RGB")
-            buffer = io.BytesIO()
-            frame.save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
-        mime = "image/png"
-    else:
-        image_bytes = image_path.read_bytes()
-
-    payload = {
-        "model": _provider_text_model(item),
-        "max_tokens": 4096,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {
-                        "type": "base64",
-                        "media_type": mime,
-                        "data": base64.b64encode(image_bytes).decode("ascii"),
-                    }},
-                    {"type": "text", "text": instruction},
-                ],
-            }
-        ],
-    }
-    result = _claude_request(str(item.get("value", "")).strip(), payload)
-    content = result.get("content") or []
-    text = "".join(
-        str(part.get("text", ""))
-        for part in content
-        if isinstance(part, dict) and part.get("type") == "text"
-    ).strip()
-    if not text:
-        raise RuntimeError("Claude returned an empty response.")
-    return text
-
 def _generic_request(item: dict, endpoint: str, payload: dict, timeout: int = 180) -> dict:
     base_url=_provider_base_url(item); model=_provider_text_model(item)
     if not base_url or not model: raise _generic_compatible_error(item)
@@ -1045,6 +775,32 @@ def _generic_prompt(item: dict, reference_path: Path) -> str:
     return _generic_chat_with_image(item,reference_path,"""Analyze the supplied reference design and create a concise production-ready content prompt for replacing its text while preserving the reference layout. Describe subject/content, important text regions, hierarchy and visual intent. Do not redesign it or invent factual details. Return only the prompt text.""")
 
 
+def _generic_image(item: dict, path: Path, instruction: str) -> bytes:
+    base_url=_provider_base_url(item); model=_provider_image_model(item)
+    if not base_url or not model: raise _generic_compatible_error(item)
+    import mimetypes
+    boundary="----ImageGeneratorBoundary"; mime=mimetypes.guess_type(path.name)[0] or "image/png"; body=bytearray()
+    def field(name,value): body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode())
+    field("model",model); field("prompt",instruction)
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"reference.png\"\r\nContent-Type: {mime}\r\n\r\n").encode()); body.extend(path.read_bytes()); body.extend(f"\r\n--{boundary}--\r\n".encode())
+    request=Request(f"{base_url.rstrip('/')}/images/edits",data=bytes(body),method="POST",headers={"Authorization":f"Bearer {str(item.get('value','')).strip()}","Content-Type":f"multipart/form-data; boundary={boundary}"})
+    try:
+        with urlopen(request,timeout=240) as response: payload=json.loads(response.read().decode())
+    except Exception as exc:
+        detail=str(exc)
+        if hasattr(exc,"read"):
+            try: detail=exc.read().decode("utf-8",errors="replace")
+            except Exception: pass
+        raise RuntimeError(f"{item.get('display_name','API')} image generation failed: {detail}") from exc
+    data=payload.get("data") or []
+    if not data: raise RuntimeError(f"{item.get('display_name','API')} returned no image output.")
+    first=data[0]
+    if first.get("b64_json"): return base64.b64decode(first["b64_json"])
+    if first.get("url"):
+        with urlopen(first["url"],timeout=120) as response: return response.read()
+    raise RuntimeError(f"{item.get('display_name','API')} returned no image data.")
+
+
 def _pipeline_metadata(pipeline_item: dict, operation: str) -> dict:
     """Return the exact selected provider identity and model for an AI operation."""
     service = str(pipeline_item.get("service") or "").strip().lower()
@@ -1066,7 +822,6 @@ def _pipeline_prompt(pipeline_item: dict, **kwargs):
     service=pipeline_item.get("service")
     if service=="openrouter": return _openrouter_prompt(str(pipeline_item["value"]).strip(),Path(path),_provider_text_model(pipeline_item))
     if service=="gemini": return _with_pipeline_key(pipeline_item,lambda:generate_image_prompt(**kwargs))
-    if service=="claude": return _claude_chat_with_image(pipeline_item,Path(path),"""Analyze the supplied reference design and create a concise production-ready content prompt for replacing its text while preserving the reference layout. Describe subject/content, important text regions, hierarchy and visual intent. Do not redesign it or invent factual details. Return only the prompt text.""")
     return _generic_prompt(pipeline_item,Path(path))
 
 
@@ -1076,28 +831,210 @@ def _pipeline_template(pipeline_item: dict, **kwargs):
     service=pipeline_item.get("service")
     if service=="openrouter": return _openrouter_template(str(pipeline_item["value"]).strip(),Path(path),_provider_text_model(pipeline_item))
     if service=="gemini": return _with_pipeline_key(pipeline_item,lambda:generate_template(**kwargs))
-    if service=="claude":
-        from PIL import Image
-        with Image.open(Path(path)) as image: width,height=image.size
-        instruction=f"""Analyze this reference poster as a design-template extraction task. Do not redesign it. Identify editable text regions and approximate bounding boxes in pixel coordinates for canvas {width}x{height}. Preserve composition, colors, decorative elements, logos and hierarchy. Return ONLY JSON: {{\"text_elements\":[{{\"id\":\"text_1\",\"text\":\"exact visible text\",\"x\":0,\"y\":0,\"width\":100,\"height\":50,\"font_size\":32,\"font_weight\":\"normal\",\"alignment\":\"left\",\"color\":\"#FFFFFF\",\"role\":\"title\"}}]}}"""
-        return _template_from_text(pipeline_item,_claude_chat_with_image(pipeline_item,Path(path),instruction),Path(path))
     return _generic_template(pipeline_item,Path(path))
 
 
-def _selected_stage_candidates(stage: str) -> list[tuple[str, dict]]:
-    """Return selected credentials capable of one specific pipeline stage."""
-    candidates: list[tuple[str, dict]] = []
-    for key_id, item in _selected_pipeline_candidates():
-        if _pipeline_key_is_usable(item, stage):
-            candidates.append((key_id, item))
-    return candidates
+def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str) -> tuple[bytes,str]:
+    service=pipeline_item.get("service")
+    key=str(pipeline_item.get("value","")).strip()
+    if service=="gemini": return _gemini_image(key,reference_path,instruction),_provider_image_model(pipeline_item)
+    if service=="openrouter": return _openrouter_image(key,reference_path,instruction,_provider_image_model(pipeline_item)),_provider_image_model(pipeline_item)
+    if service=="openai": return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
+    return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
 
+def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
+    """Generate social-media text using the selected text-capable API."""
+    service = str(
+        pipeline_item.get("service") or ""
+    ).strip().lower()
 
-def _exception_is_quota_error(exc: Exception) -> bool:
-    text = str(exc).upper()
-    return any(token in text for token in (
-        "429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE LIMIT", "RATE_LIMIT",
-    ))
+    model = str(
+        _provider_text_model(pipeline_item) or ""
+    ).strip()
+
+    api_key = str(
+        pipeline_item.get("value") or ""
+    ).strip()
+
+    if not api_key:
+        raise RuntimeError(
+            "The selected pipeline API key is empty."
+        )
+
+    if not model:
+        raise RuntimeError(
+            "The selected API key has no text-generation model configured."
+        )
+
+    # ---------------------------------------------------------
+    # Gemini
+    # ---------------------------------------------------------
+    if service == "gemini":
+
+        def call_gemini() -> str:
+            from google import genai
+
+            client = genai.Client(
+                api_key=api_key
+            )
+
+            response = client.models.generate_content(
+                model=model,
+                contents=instruction,
+            )
+
+            # Google GenAI normally exposes generated text through
+            # response.text. Keep extraction defensive so a provider
+            # response cannot produce an undefined-variable error.
+            generated_text = getattr(
+                response,
+                "text",
+                None,
+            )
+
+            if generated_text:
+                generated_text = str(
+                    generated_text
+                ).strip()
+
+            if generated_text:
+                return generated_text
+
+            # Defensive fallback for responses where .text is unavailable.
+            response_candidates = []
+
+            candidates = getattr(
+                response,
+                "candidates",
+                None,
+            )
+
+            if candidates:
+                for candidate in candidates:
+                    candidate_content = getattr(
+                        candidate,
+                        "content",
+                        None,
+                    )
+
+                    parts = getattr(
+                        candidate_content,
+                        "parts",
+                        None,
+                    ) or []
+
+                    for part in parts:
+                        part_text = getattr(
+                            part,
+                            "text",
+                            None,
+                        )
+
+                        if part_text:
+                            response_candidates.append(
+                                str(part_text)
+                            )
+
+            generated_text = "\n".join(
+                response_candidates
+            ).strip()
+
+            if not generated_text:
+                raise RuntimeError(
+                    "Gemini returned no text for the social-media description."
+                )
+
+            return generated_text
+
+        return _with_pipeline_key(
+            pipeline_item,
+            call_gemini,
+        )
+
+    # ---------------------------------------------------------
+    # OpenRouter
+    # ---------------------------------------------------------
+    if service == "openrouter":
+
+        result = _openrouter_request(
+            api_key,
+            "chat/completions",
+            {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You write platform-specific "
+                            "social-media captions. "
+                            "Follow the requested format "
+                            "and limits exactly. "
+                            "Keep emojis, icons, hashtags "
+                            "and supplied profile tags."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": instruction,
+                    },
+                ],
+                "temperature": 0.7,
+            },
+        )
+
+        return _extract_chat_text(
+            result,
+            "OpenRouter",
+        )
+
+    # ---------------------------------------------------------
+    # Generic OpenAI-compatible provider
+    # ---------------------------------------------------------
+    result = _generic_request(
+        pipeline_item,
+        "chat/completions",
+        {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You write platform-specific "
+                        "social-media captions. "
+                        "Follow the requested format "
+                        "and limits exactly. "
+                        "Keep emojis, icons, hashtags "
+                        "and supplied profile tags."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": instruction,
+                },
+            ],
+            "temperature": 0.7,
+        },
+    )
+
+    return _extract_chat_text(
+        result,
+        str(
+            pipeline_item.get("display_name")
+            or "API"
+        ),
+    )
+def _openrouter_image(api_key: str, path: Path, instruction: str, model: str | None = None) -> bytes:
+    selected_model = str(model or OPENROUTER_IMAGE_MODEL).strip()
+    if not selected_model:
+        raise RuntimeError("No OpenRouter image model is configured for the selected API key.")
+    payload={"model":selected_model,"prompt":instruction,"input_references":[{"type":"image_url","image_url":{"url":_image_data_url(path)}}],"output_format":"png"}
+    result=_openrouter_request(api_key,"images",payload,timeout=240); data=result.get("data") or []
+    if not data: raise RuntimeError("OpenRouter returned no image output.")
+    first=data[0]
+    if first.get("b64_json"): return base64.b64decode(first["b64_json"])
+    if first.get("url"):
+        with urlopen(first["url"],timeout=120) as response: return response.read()
+    raise RuntimeError("OpenRouter returned no image data.")
 
 
 def _normalize_ai_tag(raw: str) -> str:
@@ -1145,9 +1082,6 @@ def _pipeline_tag(pipeline_item: dict, path: Path) -> str:
         )
         # Gemini's existing tagger returns the project's canonical cached tag.
         return _normalize_ai_tag(raw)
-    if service == "claude":
-        raw = _claude_chat_with_image(pipeline_item, Path(path), instruction)
-        return _normalize_ai_tag(raw)
     raw = _generic_chat_with_image(
         pipeline_item,
         Path(path),
@@ -1192,62 +1126,49 @@ def normalize_drive_folder_id(value: str) -> str:
     return value
 
 
-def _decode_json_secret(value: str, label: str) -> dict:
-    """Decode a raw JSON or base64-encoded JSON deployment secret."""
+def _decode_json_secret(value: str, label: str) -> dict | None:
+    """Decode a JSON secret supplied through an environment variable.
+
+    Railway variables are kept as strings. Accept normal JSON as well as
+    base64-encoded JSON so multiline OAuth files can be stored safely.
+    """
     raw = str(value or "").strip()
     if not raw:
-        raise RuntimeError(f"{label} configuration is empty.")
+        return None
 
-    # Prefer raw JSON when it is supplied directly as an environment variable.
-    if raw.startswith("{") or raw.startswith("["):
+    candidates = [raw]
+    try:
+        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+        if decoded.strip():
+            candidates.append(decoded)
+    except Exception:
+        pass
+
+    for candidate in candidates:
         try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"{label} configuration is not valid JSON.") from exc
-    else:
-        try:
-            decoded = base64.b64decode(raw, validate=True).decode(
-                "utf-8",
-                errors="strict",
-            )
-        except Exception:
-            try:
-                decoded = base64.urlsafe_b64decode(raw).decode(
-                    "utf-8",
-                    errors="strict",
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{label} configuration is neither valid JSON nor valid base64 JSON."
-                ) from exc
+            payload = json.loads(candidate)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
 
-        try:
-            payload = json.loads(decoded)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"{label} base64 value does not contain valid JSON."
-            ) from exc
-
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"{label} configuration must contain a JSON object.")
-
-    return payload
+    raise RuntimeError(
+        f"Google Drive {label} environment variable does not contain valid JSON."
+    )
 
 
 def _load_drive_client_config() -> dict | None:
-    """Load Google OAuth client configuration from env first, then credentials.json."""
+    """Load OAuth client configuration from env first, then local file."""
     env_value = (
         os.getenv(DRIVE_CREDENTIALS_ENV, "").strip()
         or os.getenv(DRIVE_CREDENTIALS_ENV_LEGACY, "").strip()
     )
     if env_value:
-        return _decode_json_secret(env_value, "Google Drive OAuth credentials")
+        return _decode_json_secret(env_value, "OAuth credentials")
 
     if CREDENTIALS_FILE.exists():
         try:
-            payload = json.loads(
-                CREDENTIALS_FILE.read_text(encoding="utf-8")
-            )
+            payload = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 return payload
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1259,19 +1180,17 @@ def _load_drive_client_config() -> dict | None:
 
 
 def _load_drive_token_config() -> dict | None:
-    """Load authorized-user token from env first, then token.json."""
+    """Load the authorized-user token from env first, then local token.json."""
     env_value = (
         os.getenv(DRIVE_TOKEN_ENV, "").strip()
         or os.getenv(DRIVE_TOKEN_ENV_LEGACY, "").strip()
     )
     if env_value:
-        return _decode_json_secret(env_value, "Google Drive OAuth token")
+        return _decode_json_secret(env_value, "OAuth token")
 
     if TOKEN_FILE.exists():
         try:
-            payload = json.loads(
-                TOKEN_FILE.read_text(encoding="utf-8")
-            )
+            payload = json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 return payload
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1296,9 +1215,9 @@ def drive_oauth_available() -> bool:
 
 def drive_oauth_selected() -> bool:
     """
-    Google Drive is available when OAuth configuration, an authorized token,
-    and the Drive folder configuration are present. It does not depend on the
-    frontend selecting a synthetic "Google Drive API" checkbox.
+    Google Drive is available when its OAuth files and folder configuration
+    are present. It does not depend on the frontend selecting a synthetic
+    "Google Drive API" checkbox.
     """
     return (
         _drive_credentials_configured()
@@ -1313,78 +1232,76 @@ def drive_oauth_selected() -> bool:
 
 
 def get_drive_service():
-    """
-    Return an authenticated Google Drive service.
+    """Return an authenticated Google Drive service.
 
-    Local development uses backend/credentials.json and backend/token.json.
-    Railway/deployments can instead provide those same JSON documents through:
-      GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_DRIVE_TOKEN_JSON_B64
-    or the legacy raw-JSON variables:
-      GOOGLE_OAUTH_CREDENTIALS_JSON / GOOGLE_OAUTH_TOKEN_JSON
+    Local development keeps using backend/credentials.json and backend/token.json.
+    Railway provides those JSON documents through
+    GOOGLE_OAUTH_CREDENTIALS_JSON and GOOGLE_OAUTH_TOKEN_JSON.
     """
     client_config = _load_drive_client_config()
     if not client_config:
         raise RuntimeError(
             "Google Drive OAuth credentials were not found. Provide "
-            "backend/credentials.json locally or configure "
-            "GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_OAUTH_CREDENTIALS_JSON on Railway."
+            "backend/credentials.json locally or set GOOGLE_OAUTH_CREDENTIALS_JSON on Railway."
         )
 
     token_config = _load_drive_token_config()
     if not token_config:
         raise RuntimeError(
             "Google Drive OAuth token was not found. Provide backend/token.json locally "
-            "or configure GOOGLE_DRIVE_TOKEN_JSON_B64 / GOOGLE_OAUTH_TOKEN_JSON on Railway."
+            "or set GOOGLE_OAUTH_TOKEN_JSON on Railway."
         )
 
     credentials = None
+
     try:
-        credentials = Credentials.from_authorized_user_info(
-            token_config,
-            DRIVE_SCOPES,
-        )
+        # IMPORTANT: do not pass DRIVE_SCOPES here. For an existing authorized-user
+        # refresh token, google-auth must refresh using the scopes originally
+        # granted with that refresh token. Supplying a new scope list on the
+        # refresh request can cause Google to return `invalid_scope`.
+        credentials = Credentials.from_authorized_user_info(token_config)
     except Exception as exc:
         raise RuntimeError(
-            "Google Drive OAuth token is invalid or incomplete."
+            "Google Drive token.json/OAuth token is invalid or incomplete."
         ) from exc
 
-    if credentials.valid:
+    if credentials and credentials.valid:
         return build(
             "drive",
             "v3",
             credentials=credentials,
         )
 
-    if credentials.expired and credentials.refresh_token:
+    if credentials and credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(GoogleAuthRequest())
-
-            # Preserve the existing local behavior when token.json exists.
-            # Environment-backed Railway credentials are intentionally not
-            # written back to disk or exposed in application responses.
-            if TOKEN_FILE.exists():
-                TOKEN_FILE.write_text(
-                    credentials.to_json(),
-                    encoding="utf-8",
-                )
-
-            return build(
-                "drive",
-                "v3",
-                credentials=credentials,
-            )
         except Exception as exc:
+            # Do not mislabel every refresh failure as an expired/invalid token.
+            # Keep the original Google exception so the actual failure is visible.
+            error_text = str(exc).strip() or repr(exc)
             raise RuntimeError(
-                "Google Drive authorization has expired and could not be refreshed. "
-                "Refresh the OAuth token or run 'python test_google_drive.py' locally "
-                "to authorize again."
+                f"Google Drive OAuth refresh failed: {error_text}"
             ) from exc
 
-    raise RuntimeError(
-        "Google Drive is not authorized. Provide a valid authorized-user token "
-        "with a refresh token, or run 'python test_google_drive.py' locally to authorize again."
-    )
+        # Keep the old local behavior: refreshed credentials are persisted
+        # when token.json exists. On Railway, secrets come from environment
+        # variables, so do not attempt to write them into the container.
+        if not os.getenv(DRIVE_TOKEN_ENV, "").strip() and not os.getenv(DRIVE_TOKEN_ENV_LEGACY, "").strip():
+            TOKEN_FILE.write_text(
+                credentials.to_json(),
+                encoding="utf-8",
+            )
 
+        return build(
+            "drive",
+            "v3",
+            credentials=credentials,
+        )
+
+    raise RuntimeError(
+        "Google Drive is not authorized yet. Provide a valid authorized-user token "
+        "through backend/token.json locally or GOOGLE_OAUTH_TOKEN_JSON on Railway."
+    )
 
 
 def require_drive_configuration():
@@ -1425,9 +1342,8 @@ def require_drive_configuration():
         raise HTTPException(
             status_code=500,
             detail=(
-                "Google Drive OAuth credentials were not found. Configure "
-                "GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_OAUTH_CREDENTIALS_JSON "
-                "on Railway, or provide backend/credentials.json locally."
+                "Google Drive OAuth credentials were not configured. Provide "
+                "backend/credentials.json locally or set GOOGLE_OAUTH_CREDENTIALS_JSON on Railway."
             ),
         )
 
@@ -1435,9 +1351,8 @@ def require_drive_configuration():
         raise HTTPException(
             status_code=500,
             detail=(
-                "Google Drive OAuth token was not found. Configure "
-                "GOOGLE_DRIVE_TOKEN_JSON_B64 / GOOGLE_OAUTH_TOKEN_JSON "
-                "on Railway, or provide backend/token.json locally."
+                "Google Drive OAuth token was not configured. Provide backend/token.json locally "
+                "or set GOOGLE_OAUTH_TOKEN_JSON on Railway."
             ),
         )
 
@@ -1711,6 +1626,17 @@ load_persisted_drive_configuration()
 # CORS
 # -------------------------------------------------------------------
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://frontend-production-14d5.up.railway.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # -------------------------------------------------------------------
@@ -1842,6 +1768,39 @@ def is_valid_http_url(
 # API key setup
 # -------------------------------------------------------------------
 
+def is_api_credential_name(key_name: str) -> bool:
+    """Return True only for actual credential entries, not configuration."""
+    name = normalize_key_name(key_name)
+    if not name:
+        return False
+    configuration_suffixes = (
+        "_BASE_URL", "_API_BASE_URL", "_ENDPOINT", "_MODEL",
+        "_TEXT_MODEL", "_IMAGE_MODEL", "_MODEL_IMAGE",
+        "_FOLDER_ID", "_FOLDER_URL", "_FOLDER_NAME", "_DRIVE_NAME",
+        "_NAME", "_TIMEOUT", "_HOST", "_PORT",
+    )
+    if name in {
+        "MODEL", "TEXT_MODEL", "IMAGE_MODEL", "AI_TEXT_MODEL",
+        "AI_IMAGE_MODEL", "AI_BASE_URL", "API_BASE_URL",
+        "GOOGLE_DRIVE_FOLDER_ID", "GOOGLE_DRIVE_FOLDER_NAME",
+        "GOOGLE_DRIVE_FOLDER_URL", "GDRIVE_FOLDER_ID",
+        "GDRIVE_FOLDER_NAME", "GDRIVE_FOLDER_URL",
+    }:
+        return False
+    if name.endswith(configuration_suffixes):
+        return False
+    # Google Drive is reference/storage only and must never appear as an AI key.
+    if "DRIVE" in name or "GDRIVE" in name:
+        return False
+    return (
+        "API_KEY" in name
+        or name.endswith("_TOKEN")
+        or name.endswith("_SECRET")
+        or name.endswith("_CREDENTIAL")
+        or name.endswith("_CREDENTIALS")
+    )
+
+
 @app.post(
     "/api/api-keys/upload"
 )
@@ -1893,7 +1852,6 @@ async def upload_api_keys_file(
             file_bytes,
             filename,
         )
-        api_icon_map = extract_api_key_icons(file_bytes, filename)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
@@ -1920,16 +1878,12 @@ async def upload_api_keys_file(
         "GOOGLE_DRIVE_FOLDER_URL", "GDRIVE_FOLDER_URL", "DRIVE_FOLDER_URL",
         "GOOGLE_DRIVE_FOLDER_NAME", "GDRIVE_FOLDER_NAME", "GOOGLE_DRIVE_NAME",
         "GDRIVE_NAME", "DRIVE_FOLDER_NAME", "DRIVE_NAME",
-        "GOOGLE_DRIVE_FOLDER_IDS", "GDRIVE_FOLDER_IDS", "DRIVE_FOLDER_IDS",
-        "GOOGLE_DRIVE_OUTPUT_FOLDER_ID", "GDRIVE_OUTPUT_FOLDER_ID", "DRIVE_OUTPUT_FOLDER_ID",
-        "GOOGLE_DRIVE_OUTPUT_FOLDER_IDS", "GDRIVE_OUTPUT_FOLDER_IDS", "DRIVE_OUTPUT_FOLDER_IDS",
-        "GOOGLE_DRIVE_OUTPUT_FOLDER_NAME", "GDRIVE_OUTPUT_FOLDER_NAME", "DRIVE_OUTPUT_FOLDER_NAME",
     }
     provider_counts: dict[str, int] = {}
     for key_name, value in values.items():
         normalized = normalize_key_name(key_name)
         base_name = re.sub(r"_\d+$", "", normalized)
-        if not value or base_name in configuration_names:
+        if not value or base_name in configuration_names or not is_api_credential_name(normalized):
             continue
         # Credential names are not a capability gate. Any credential can be
         # selected; its actual protocol/capabilities are resolved at runtime.
@@ -1946,27 +1900,37 @@ async def upload_api_keys_file(
             display_name = f"{display_name} {occurrence}"
         API_KEY_STATE["keys"][normalized] = {
             "key_name": normalized, "value": str(value).strip(),
-            "display_name": display_name,
-            "display_icon": api_icon_map.get(normalized, ""),
-            "auth_type": "api-key",
-            "service": service,
+            "display_name": display_name, "auth_type": "api-key",
+            "service": service, "image_generation": service_can_generate_image(service),
         }
-        # Capability is evaluated from the actual credential/configuration,
-        # not from the provider name alone. This makes newly added providers
-        # work when their required endpoint/model settings are supplied.
-        API_KEY_STATE["keys"][normalized]["image_generation"] = service_can_generate_image(
-            API_KEY_STATE["keys"][normalized]
-        )
 
-    drive_folders = extract_drive_folder_configs(values)
-    drive_output_folders = extract_drive_output_folder_configs(values)
-    API_KEY_STATE["drive_folders"] = drive_folders
-    API_KEY_STATE["drive_output_folders"] = drive_output_folders
-    API_KEY_STATE["drive_folder_id"] = drive_folders[0]["id"] if drive_folders else ""
-    API_KEY_STATE["drive_folder_name"] = drive_folders[0]["name"] if drive_folders else ""
-    API_KEY_STATE["drive_output_folder_id"] = ""
-    API_KEY_STATE["drive_output_folder_name"] = "outputs"
+    drive_folder_id = find_config_value(
+        values,
+        (
+            "GOOGLE_DRIVE_FOLDER_ID",
+            "GDRIVE_FOLDER_ID",
+            "DRIVE_FOLDER_ID",
+            "GOOGLE_DRIVE_FOLDER_URL",
+            "GDRIVE_FOLDER_URL",
+            "DRIVE_FOLDER_URL",
+        ),
+    )
+    drive_folder_id = normalize_drive_folder_id(drive_folder_id)
 
+    drive_folder_name = find_config_value(
+        values,
+        (
+            "GOOGLE_DRIVE_FOLDER_NAME",
+            "GDRIVE_FOLDER_NAME",
+            "GOOGLE_DRIVE_NAME",
+            "GDRIVE_NAME",
+            "DRIVE_FOLDER_NAME",
+            "DRIVE_NAME",
+        ),
+    )
+
+    API_KEY_STATE["drive_folder_id"] = drive_folder_id
+    API_KEY_STATE["drive_folder_name"] = drive_folder_name
     API_KEY_STATE["gemini_model"] = (
         find_config_value(
             values,
@@ -1978,49 +1942,15 @@ async def upload_api_keys_file(
     # Keep the non-secret Drive folder configuration across backend restarts.
     persist_drive_configuration()
 
-    # Google Drive is an OAuth service, not another API-key credential.
-    if drive_oauth_available() and drive_folders:
-        API_KEY_STATE["keys"][DRIVE_OAUTH_KEY_ID] = {
-            "key_name": DRIVE_OAUTH_KEY_ID,
-            "value": "",
-            "display_name": "Google Drive API",
-            "display_icon": "",
-            "auth_type": "oauth",
-            "service": "google-drive",
-        }
-
-    response_keys = []
-    name_counts: dict[str, int] = {}
-    for key_id, item in API_KEY_STATE["keys"].items():
-        # Show the actual API key name from the uploaded configuration, not a
-        # provider label. Duplicate credentials remain visible as 1, 2, 3...
-        base_name = str(item.get("key_name") or key_id).strip()
-        base_name = re.sub(r"_\d+$", "", base_name)
-        occurrence = name_counts.get(base_name, 0) + 1
-        name_counts[base_name] = occurrence
-        display_name = base_name if occurrence == 1 and name_counts.get(base_name, 0) == 1 else f"{base_name} {occurrence}"
-        # If the name only occurs once, remove any temporary numbering.
-        response_keys.append({
+    response_keys = [
+        {
             "id": key_id,
-            "name": display_name,
+            "name": item["display_name"],
             "keyName": key_id,
             "authType": item.get("auth_type", "api-key"),
-            "icon": item.get("display_icon", ""),
-        })
-
-    # Convert a repeated provider/key name to 1, 2, 3 only when duplicated.
-    totals: dict[str, int] = {}
-    for item in response_keys:
-        base = re.sub(r" \d+$", "", item["name"])
-        totals[base] = totals.get(base, 0) + 1
-    seen: dict[str, int] = {}
-    for item in response_keys:
-        base = re.sub(r" \d+$", "", item["name"])
-        seen[base] = seen.get(base, 0) + 1
-        if totals[base] == 1:
-            item["name"] = base
-        else:
-            item["name"] = f"{base} {seen[base]}"
+        }
+        for key_id, item in API_KEY_STATE["keys"].items()
+    ]
 
     return {
         "success": True,
@@ -2048,12 +1978,11 @@ def select_api_keys(
         if key_id in available
     ]
 
-    # Empty selection is valid while the user is still on API Setup.
-    # Actual AI operations require at least one stage-capable selected key.
     API_KEY_STATE["selected_ids"] = list(selected_ids)
     API_KEY_STATE["pipeline_key_id"] = ""
 
-    configure_selected_environment()
+    if selected_ids:
+        configure_selected_environment()
 
     selected_names = [
         available[key_id]["display_name"]
@@ -2080,6 +2009,69 @@ def api_key_status():
             if key_id in available
         ],
     }
+
+
+# -------------------------------------------------------------------
+# Google Drive output-folder configuration
+# -------------------------------------------------------------------
+
+@app.get("/api/drive/folders")
+def get_drive_folders():
+    """Return the configured Google Drive parent/output folders.
+
+    The frontend uses this endpoint only for the Save-to-Drive folder picker.
+    It does not expose OAuth secrets or API-key values.
+    """
+    folder_id, folder_name = require_drive_configuration()
+
+    try:
+        service = get_drive_service()
+        resolved_parent_id = resolve_drive_folder_id(
+            service,
+            folder_id,
+            folder_name,
+        )
+
+        # Keep the configured parent as the selectable folder. The actual
+        # generated image is always placed in its `outputs` child folder.
+        parent_name = str(folder_name or "").strip()
+        if not parent_name:
+            metadata = service.files().get(
+                fileId=resolved_parent_id,
+                fields="id,name",
+            ).execute()
+            parent_name = str(metadata.get("name") or "Google Drive folder")
+
+        outputs_folder_id = ensure_drive_outputs_folder(
+            service,
+            resolved_parent_id,
+        )
+
+        API_KEY_STATE["drive_folder_id"] = resolved_parent_id
+        API_KEY_STATE["drive_folder_name"] = parent_name
+        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
+        API_KEY_STATE["drive_output_folder_name"] = "outputs"
+        persist_drive_configuration()
+
+        return {
+            "success": True,
+            "folders": [
+                {
+                    "id": resolved_parent_id,
+                    "name": parent_name,
+                    "label": parent_name,
+                }
+            ],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print("Google Drive folder loading failed:", repr(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to load configured Google Drive output folders: {exc}",
+        ) from exc
 
 
 # -------------------------------------------------------------------
@@ -2136,11 +2128,8 @@ def get_drive_file(
     inline image response.
     """
 
-    # A Drive file ID returned by /api/drive/inputs is already a backend-known
-    # reference. Previewing that file should depend on Drive authorization and
-    # the file's own access permissions, not on the mutable folder-config state.
-    # This prevents a valid preview request from returning 400 when the folder
-    # configuration has not been restored into application state yet.
+    require_drive_configuration()
+
     file_id = str(
         file_id or ""
     ).strip()
@@ -2288,40 +2277,30 @@ def get_input_files() -> list[dict]:
         or API_KEY_STATE.get("drive_folder_name", "")
     )
 
-    if (
-        has_drive_configuration
-        and CREDENTIALS_FILE.exists()
-        and TOKEN_FILE.exists()
-    ):
+    if has_drive_configuration:
         try:
+            folder_id = normalize_drive_folder_id(
+                API_KEY_STATE.get("drive_folder_id", "")
+            )
+            folder_name = str(
+                API_KEY_STATE.get("drive_folder_name", "")
+            ).strip()
+
             service = get_drive_service()
-            configured_folders = API_KEY_STATE.get("drive_folders", [])
-            if not configured_folders:
-                configured_folders = [{
-                    "id": normalize_drive_folder_id(API_KEY_STATE.get("drive_folder_id", "")),
-                    "name": str(API_KEY_STATE.get("drive_folder_name", "") or "").strip(),
-                }]
 
-            all_drive_files: list[dict] = []
-            resolved_folders: list[dict[str, str]] = []
-            for folder in configured_folders:
-                folder_id = normalize_drive_folder_id(str(folder.get("id", "") or ""))
-                folder_name = str(folder.get("name", "") or "").strip()
-                if not folder_id and not folder_name:
-                    continue
-                resolved_folder_id = resolve_drive_folder_id(service, folder_id, folder_name)
-                resolved_folders.append({"id": resolved_folder_id, "name": folder_name})
-                for drive_file in get_drive_files(service, resolved_folder_id):
-                    drive_file["driveFolderId"] = resolved_folder_id
-                    drive_file["driveFolderName"] = folder_name
-                    all_drive_files.append(drive_file)
+            resolved_folder_id = resolve_drive_folder_id(
+                service,
+                folder_id,
+                folder_name,
+            )
 
-            drive_files = all_drive_files
-            API_KEY_STATE["drive_folders"] = resolved_folders
-            if resolved_folders:
-                API_KEY_STATE["drive_folder_id"] = resolved_folders[0]["id"]
-                API_KEY_STATE["drive_folder_name"] = resolved_folders[0]["name"]
+            API_KEY_STATE["drive_folder_id"] = resolved_folder_id
             persist_drive_configuration()
+
+            drive_files = get_drive_files(
+                service,
+                resolved_folder_id,
+            )
 
         except Exception as exc:
             raise HTTPException(
@@ -2409,284 +2388,6 @@ def health():
     return {
         "status": "ok"
     }
-
-
-# -------------------------------------------------------------------
-# Canva MCP OAuth / connection endpoints
-# -------------------------------------------------------------------
-
-@app.get("/api/canva/oauth/start")
-async def canva_oauth_start():
-    """Initialize the Canva MCP OAuth provider.
-
-    The actual browser authorization is completed by the MCP OAuth
-    flow. This endpoint intentionally does not expose OAuth tokens.
-    """
-
-    try:
-        service = canva_mcp_service
-
-        if service.oauth_provider is None:
-            service.create_oauth_provider()
-
-        return {
-            "success": True,
-            "message": (
-                "Canva OAuth service is initialized. "
-                "The MCP connection will start the authorization flow "
-                "when authentication is required."
-            ),
-            "server": service.server_url,
-            "redirect_uri": (
-                "http://127.0.0.1:8000/api/canva/oauth/callback"
-            ),
-        }
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Canva OAuth initialization failed: {exc}",
-        ) from exc
-
-
-@app.get("/api/canva/oauth/status")
-async def canva_oauth_status():
-    """Return the current Canva MCP OAuth state."""
-
-    try:
-        return await canva_mcp_service.get_connection_status()
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unable to read Canva OAuth status: {exc}",
-        ) from exc
-
-
-@app.get("/api/canva/oauth/callback")
-async def canva_oauth_callback(
-    code: str | None = None,
-    state: str | None = None,
-    iss: str | None = None,
-    error: str | None = None,
-    error_description: str | None = None,
-):
-    """
-    Receive the OAuth redirect from Canva and pass it to the MCP OAuth
-    provider. The authorization code is never returned to the frontend.
-    """
-
-    try:
-        result = await canva_mcp_service.complete_oauth_callback(
-            code=code,
-            state=state,
-            iss=iss,
-            error=error,
-            error_description=error_description,
-        )
-
-        if not result.get("success"):
-            message = str(
-                result.get("message")
-                or result.get("error_description")
-                or result.get("error")
-                or "Canva authorization failed."
-            )
-            return HTMLResponse(
-                content=(
-                    "<!doctype html>"
-                    "<html><head><title>Canva Authorization</title></head>"
-                    "<body style=\"font-family:Arial,sans-serif;padding:40px;\">"
-                    "<h2>Canva authorization failed</h2>"
-                    f"<p>{message}</p>"
-                    "<p>You can close this window and return to the Image Generator.</p>"
-                    "</body></html>"
-                ),
-                status_code=400,
-            )
-
-        return HTMLResponse(
-            content=(
-                "<!doctype html>"
-                "<html><head><title>Canva Authorization</title></head>"
-                "<body style=\"font-family:Arial,sans-serif;padding:40px;\">"
-                "<h2>Canva authorization received</h2>"
-                "<p>The Image Generator received the Canva authorization response.</p>"
-                "<p>You can close this window and return to the Image Generator.</p>"
-                "</body></html>"
-            ),
-            status_code=200,
-        )
-
-    except Exception as exc:
-        import traceback
-
-        print()
-        print("=" * 80)
-        print("CANVA OAUTH CALLBACK ERROR")
-        print("=" * 80)
-        traceback.print_exc()
-        print("=" * 80)
-        print()
-
-        raise HTTPException(
-            status_code=500,
-            detail=f"Canva OAuth callback failed: {type(exc).__name__}: {exc}",
-        ) from exc
-
-
-
-@app.get("/api/canva/connect/oauth/start")
-async def canva_connect_oauth_start():
-    """Start Canva Connect OAuth for direct local-file uploads."""
-    try:
-        return canva_mcp_service.start_connect_oauth()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/api/canva/connect/oauth/status")
-async def canva_connect_oauth_status():
-    return canva_mcp_service.get_connect_connection_status()
-
-
-@app.get("/api/canva/connect/oauth/callback")
-async def canva_connect_oauth_callback(
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None,
-    error_description: str | None = None,
-):
-    try:
-        result = await canva_mcp_service.complete_connect_oauth_callback(
-            code=code,
-            state=state,
-            error=error,
-            error_description=error_description,
-        )
-        return HTMLResponse(
-            content=(
-                "<!doctype html><html><head><title>Canva Connected</title></head>"
-                "<body style='font-family:Arial,sans-serif;padding:40px'>"
-                "<h2>Canva connected successfully</h2>"
-                "<p>You can close this window and return to the Image Generator.</p>"
-                "</body></html>"
-            ),
-            status_code=200,
-        )
-    except Exception as exc:
-        import html
-        message = html.escape(str(exc))
-        return HTMLResponse(
-            content=(
-                "<!doctype html><html><head><title>Canva Connection Failed</title></head>"
-                "<body style='font-family:Arial,sans-serif;padding:40px'>"
-                "<h2>Canva connection failed</h2>"
-                f"<p>{message}</p>"
-                "<p>Close this window, correct the Canva Connect settings, and try again.</p>"
-                "</body></html>"
-            ),
-            status_code=400,
-        )
-
-
-@app.post("/api/canva/create-from-generated-image")
-async def canva_create_from_generated_image(
-    filename: str = Form(...),
-    design_type: str = Form("poster"),
-):
-    """Create a Canva design from a local generated image without a public tunnel.
-
-    The backend uploads the local image bytes directly to Canva Connect, creates
-    a custom-size design containing that image, and returns Canva's temporary edit
-    URL. Canva MCP remains available for authenticated MCP inspection/editing.
-    """
-    safe_name = Path(filename).name
-    if not safe_name:
-        raise HTTPException(status_code=400, detail="Generated image filename is required.")
-
-    local_path = IMAGE_OUTPUT_DIR / safe_name
-    if not local_path.exists() or not local_path.is_file():
-        raise HTTPException(status_code=404, detail="Generated image was not found on the server.")
-
-    try:
-        result = await canva_mcp_service.create_editable_design_from_local_image(
-            local_path=str(local_path),
-            design_type=design_type.strip() or "poster",
-            asset_name=safe_name,
-            user_intent=(
-                "Create an editable Canva design from the generated Image Generator output."
-            ),
-        )
-        return result
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
-        message = str(exc)
-        lowered = message.lower()
-        if "not configured" in lowered or "not authorized" in lowered or "not authorized" in lowered or "oauth" in lowered or "authorization" in lowered or "connect first" in lowered:
-            status = 401
-        else:
-            status = 502
-        raise HTTPException(status_code=status, detail=message) from exc
-
-
-@app.get("/api/canva/tools")
-async def canva_list_tools():
-    """Connect to Canva MCP and list the tools available to the backend."""
-
-    try:
-        tools = await canva_mcp_service.list_tools()
-
-        return {
-            "success": True,
-            "count": len(tools),
-            "tools": tools,
-        }
-
-    except BaseException as exc:
-        import traceback
-
-        print()
-        print("=" * 80)
-        print("CANVA MCP ERROR")
-        print("=" * 80)
-        print()
-        traceback.print_exception(type(exc), exc, exc.__traceback__)
-
-        # Python 3.11+ TaskGroup errors are ExceptionGroups. Print every
-        # nested exception so the real MCP/OAuth/network error is visible
-        # instead of only reporting "unhandled errors in a TaskGroup".
-        if isinstance(exc, BaseExceptionGroup):
-            print()
-            print("=" * 80)
-            print("NESTED TASKGROUP EXCEPTIONS")
-            print("=" * 80)
-
-            def _print_nested(group: BaseExceptionGroup, indent: int = 0) -> None:
-                prefix = " " * indent
-                for index, nested in enumerate(group.exceptions, start=1):
-                    print(
-                        f"{prefix}[{index}] "
-                        f"{type(nested).__name__}: {nested}"
-                    )
-                    if isinstance(nested, BaseExceptionGroup):
-                        _print_nested(nested, indent + 4)
-
-            _print_nested(exc)
-            print("=" * 80)
-
-        print("END CANVA MCP ERROR")
-        print("=" * 80)
-        print()
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Canva MCP connection failed: "
-                f"{type(exc).__name__}: {exc}"
-            ),
-        ) from exc
 
 
 # -------------------------------------------------------------------
@@ -2824,7 +2525,7 @@ async def upload_input_file(
         )
 
         if API_KEY_STATE.get("selected_ids"):
-            _, pipeline_item = _require_pipeline_key("text")
+            _, pipeline_item = _require_pipeline_key()
             tag = _pipeline_tag(pipeline_item, destination)
             # Keep the existing metadata cache format used by the frontend.
             try:
@@ -2918,7 +2619,7 @@ def tag_input_file(
 
     try:
 
-        _, pipeline_item = _require_pipeline_key("text")
+        _, pipeline_item = _require_pipeline_key()
         tag = _pipeline_tag(pipeline_item, file_path)
 
     except Exception as exc:
@@ -2959,7 +2660,7 @@ def tag_all_input_files():
     results = []
     errors = []
 
-    _, pipeline_item = _require_pipeline_key("text")
+    _, pipeline_item = _require_pipeline_key()
 
     # ---------------------------------------------------------------
     # Manual uploads
@@ -3188,305 +2889,537 @@ def _resolve_generation_reference(source_type: str, source: str, filename: str, 
     if not path.exists() or not is_valid_image_file(path): raise HTTPException(status_code=400, detail="The selected reference is not a readable image.")
     return path, content_type or get_mime_type(path)
 
+def _generation_instruction(prompt: str, template_json: str = "{}") -> str:
+    # Template generation is intentionally disabled. The reference image and
+    # the user's manual prompt are the only design inputs.
+    return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
 
-def _prepare_reference_paths(reference_entries: list[tuple[int, Path, str]]) -> list[Path]:
-    """Return reference files in the exact numbered order used by the prompt."""
-    if not reference_entries:
-        raise RuntimeError("At least one reference image is required.")
-
-    # Keep the same order for the provider payload and the reference-number map.
-    # This is what lets prompts such as "use reference 3 for the clothing"
-    # point to the correct visual input even when reference numbers are sparse
-    # (for example, selected references 1 and 3).
-    return [entry[1] for entry in reference_entries]
-
-
-def _generation_instruction(
-    prompt: str,
-    template_json: str,
-    reference_map: str = "",
-) -> str:
-    """Build the final image instruction from the user's manual request only.
-
-    ``template_json`` is intentionally accepted for frontend/backward compatibility,
-    but it is NOT used in this generation path. The user prompt is the source of truth.
-    """
-    reference_context = (
-        "REFERENCE NUMBER MAP (authoritative; inputs are sent in this same order):\n"
-        f"{reference_map}\n"
-        if reference_map
-        else ""
-    )
-
-    return f"""Generate exactly ONE final image from the supplied reference images.
-
-REFERENCE INPUT RULES
-{reference_context}
-- Every reference image is a separate input image, not a collage or contact sheet.
-- The reference numbers in the map identify the exact images available to the model.
-- When the user mentions a specific reference number, use that exact reference for that instruction.
-- Example: "Change the background of reference 2" means make the requested background change using reference 2; do not substitute reference 1 or another image.
-- Example: "Use reference 1 for the person and reference 3 for the clothing" means combine those requested elements into one final image.
-- Example: "Use 1 and 3" means use only references 1 and 3 for the requested change.
-- Do not borrow, replace, remove, or redesign elements from an unmentioned reference unless the user explicitly asks for them.
-- If the user gives a global instruction without a reference number, apply only that requested change to the final result.
-- Never output the references side-by-side, as separate panels, thumbnails, grids, or multiple frames. Always produce ONE coherent final image.
-
-STRICT EDITING RULES
-- Apply ONLY the changes explicitly requested by the user.
-- Preserve everything else from the relevant reference image(s) unless the user explicitly asks for a change.
-- Preserve the original composition, layout, spacing, people, objects, logos, branding, colors, background, lighting, typography hierarchy, decorative elements, and visual style when they are not part of the requested change.
-- For text edits, use the exact text supplied by the user. Preserve spelling, capitalization, numbers, punctuation, and the original text position/style unless the user explicitly requests otherwise.
-- Remove only items the user explicitly asks to remove.
-- Add only items the user explicitly asks to add. Do not invent extra content.
-- Do not invent names, dates, prices, contact details, URLs, phone numbers, email addresses, titles, or other factual information.
-- Do not redesign the reference or make unrelated improvements.
-
-USER REQUEST
-{prompt.strip()}
-
-Produce one final image that follows the user request exactly while preserving all unrequested content.
-"""
-def _gemini_image(api_key: str, paths: list[Path], instruction: str, model: str | None = None) -> bytes:
+def _gemini_image(api_key: str, path: Path, instruction: str) -> bytes:
     from google import genai
     from google.genai import types
-
     client = genai.Client(api_key=api_key)
-    contents = [types.Part.from_text(text=instruction)]
-
-    for path in paths:
-        contents.append(
-            types.Part.from_bytes(
-                data=path.read_bytes(),
-                mime_type=get_mime_type(path),
-            )
-        )
-
-    response = client.models.generate_content(
-        model=str(model or "gemini-3.1-flash-image").strip(),
-        contents=contents,
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-    )
-
+    response = client.models.generate_content(model="gemini-3.1-flash-image", contents=[types.Part.from_text(text=instruction), types.Part.from_bytes(data=path.read_bytes(), mime_type=get_mime_type(path))], config=types.GenerateContentConfig(response_modalities=["IMAGE"]))
     for part in response.parts or []:
         inline_data = getattr(part, "inline_data", None)
         if inline_data is not None:
+            # google-genai can expose an SDK image wrapper whose save() method
+            # does not accept PIL's format= keyword. Prefer the raw image bytes
+            # supplied by Gemini.
             image_data = getattr(inline_data, "data", None)
             if image_data:
                 return bytes(image_data)
 
+            # Compatibility fallback for SDK versions that do not expose the
+            # inline bytes directly.
             image_obj = part.as_image()
             out = io.BytesIO()
             image_obj.convert("RGB").save(out, "PNG")
             return out.getvalue()
+    raise RuntimeError("The Gemini API returned no image. This key may not have access to the image-generation model.")
 
-    raise RuntimeError(
-        "The Gemini API returned no image. This key may not have access to the image-generation model."
-    )
-
-
-def _multipart_image_body(
-    paths: list[Path],
-    instruction: str,
-    model: str,
-) -> tuple[bytes, str]:
-    """Build an OpenAI-compatible multipart image edit request.
-
-    Repeated image[] fields allow providers that support multiple edit inputs
-    to receive every reference independently instead of receiving a collage.
-    """
+def _openai_image(api_key: str, path: Path, instruction: str) -> bytes:
     import mimetypes
-
-    boundary = "----ImageGeneratorBoundary"
-    body = bytearray()
-
-    def field(name: str, value: str) -> None:
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-                f"{value}\r\n"
-            ).encode()
-        )
-
-    field("model", model)
-    field("prompt", instruction)
-
-    for index, path in enumerate(paths, start=1):
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="image[]"; '
-                f'filename="reference_{index}.png"\r\n'
-                f"Content-Type: {mime}\r\n\r\n"
-            ).encode()
-        )
-        body.extend(path.read_bytes())
-        body.extend(b"\r\n")
-
-    body.extend(f"--{boundary}--\r\n".encode())
-    return bytes(body), boundary
-
-
-def _openai_image(api_key: str, paths: list[Path], instruction: str, model: str | None = None) -> bytes:
-    body, boundary = _multipart_image_body(paths, instruction, str(model or "gpt-image-2").strip())
-    req = Request(
-        "https://api.openai.com/v1/images/edits",
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
+    boundary="----ImageGeneratorBoundary"
+    mime=mimetypes.guess_type(path.name)[0] or "image/png"
+    body=bytearray()
+    def field(name,value): return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
+    body.extend(field("model","gpt-image-2")); body.extend(field("prompt",instruction))
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"reference.png\"\r\nContent-Type: {mime}\r\n\r\n").encode()); body.extend(path.read_bytes()); body.extend(f"\r\n--{boundary}--\r\n".encode())
+    req=Request("https://api.openai.com/v1/images/edits",data=bytes(body),method="POST",headers={"Authorization":f"Bearer {api_key}","Content-Type":f"multipart/form-data; boundary={boundary}"})
     try:
-        with urlopen(req, timeout=180) as response:
-            payload = json.loads(response.read().decode())
-    except Exception as exc:
-        raise RuntimeError(f"OpenAI image generation failed: {exc}") from exc
-
-    item = (payload.get("data") or [None])[0]
-    if not item:
-        raise RuntimeError("OpenAI returned no image output.")
-    if item.get("b64_json"):
-        return base64.b64decode(item["b64_json"])
+        with urlopen(req,timeout=180) as response: payload=json.loads(response.read().decode())
+    except Exception as exc: raise RuntimeError(f"OpenAI image generation failed: {exc}") from exc
+    item=(payload.get("data") or [None])[0]
+    if not item: raise RuntimeError("OpenAI returned no image output.")
+    if item.get("b64_json"): return base64.b64decode(item["b64_json"])
     if item.get("url"):
-        with urlopen(item["url"], timeout=60) as response:
-            return response.read()
+        with urlopen(item["url"],timeout=60) as response: return response.read()
     raise RuntimeError("OpenAI returned no image data.")
 
-
-def _generic_image(item: dict, paths: list[Path], instruction: str) -> bytes:
-    base_url = _provider_base_url(item)
-    model = _provider_image_model(item)
-    if not base_url or not model:
-        raise _generic_compatible_error(item)
-
-    body, boundary = _multipart_image_body(paths, instruction, model)
-    request = Request(
-        f"{base_url.rstrip('/')}/images/edits",
-        data=body,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {str(item.get('value', '')).strip()}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
+def _pipeline_description(pipeline_item: dict, image_path: Path, user_prompt: str) -> str:
+    """Generate a concise description of the finished image."""
+    instruction = (
+        "Describe the supplied generated poster/image in 2 to 4 concise sentences. "
+        "Mention the main subject, important visible text or message, visual style, "
+        "and notable composition. Do not invent facts that are not visible. "
+        f"The user's content request was: {user_prompt.strip()}"
     )
-    try:
-        with urlopen(request, timeout=240) as response:
-            payload = json.loads(response.read().decode())
-    except Exception as exc:
-        detail = str(exc)
-        if hasattr(exc, "read"):
-            try:
-                detail = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-        raise RuntimeError(
-            f"{item.get('display_name', 'API')} image generation failed: {detail}"
-        ) from exc
-
-    data = payload.get("data") or []
-    if not data:
-        raise RuntimeError(
-            f"{item.get('display_name', 'API')} returned no image output."
-        )
-
-    first = data[0]
-    if first.get("b64_json"):
-        return base64.b64decode(first["b64_json"])
-    if first.get("url"):
-        with urlopen(first["url"], timeout=120) as response:
-            return response.read()
-    raise RuntimeError(
-        f"{item.get('display_name', 'API')} returned no image data."
-    )
-
-
-def _pipeline_image(
-    pipeline_item: dict,
-    reference_paths: list[Path],
-    instruction: str,
-) -> tuple[bytes, str]:
-    """Generate one image from multiple independent reference inputs."""
-    service = str(pipeline_item.get("service") or "").strip().lower()
+    service = str(pipeline_item.get("service", "other"))
     key = str(pipeline_item.get("value", "")).strip()
 
-    if not reference_paths:
-        raise RuntimeError("At least one reference image is required.")
-
-    if not _pipeline_key_is_usable(pipeline_item, "image"):
-        raise RuntimeError(
-            f"{pipeline_item.get('display_name', 'Selected API')} does not provide "
-            "image-generation capability."
+    if service == "openrouter":
+        return _openrouter_chat_with_image(
+            key, image_path, instruction, _provider_text_model(pipeline_item)
         )
 
     if service == "gemini":
-        return (
-            _gemini_image(key, reference_paths, instruction, _provider_image_model(pipeline_item)),
-            _provider_image_model(pipeline_item),
+        from google import genai
+        from google.genai import types
+        client = genai.Client(api_key=key)
+        response = client.models.generate_content(
+            model=_provider_text_model(pipeline_item),
+            contents=[
+                types.Part.from_text(text=instruction),
+                types.Part.from_bytes(
+                    data=image_path.read_bytes(),
+                    mime_type=get_mime_type(image_path),
+                ),
+            ],
         )
+        text = str(getattr(response, "text", "") or "").strip()
+        if not text:
+            raise RuntimeError("The selected API returned an empty image description.")
+        return text
 
-    if service == "openrouter":
-        model = _provider_image_model(pipeline_item)
-        return (
-            _openrouter_image(key, reference_paths, instruction, model),
-            model,
-        )
-
-    if service == "openai":
-        model = _provider_image_model(pipeline_item)
-        return _openai_image(key, reference_paths, instruction, model), model
-
-    model = _provider_image_model(pipeline_item)
-    return _generic_image(pipeline_item, reference_paths, instruction), model
+    return _generic_chat_with_image(pipeline_item, image_path, instruction)
 
 
-def _openrouter_image(
-    api_key: str,
-    paths: list[Path],
-    instruction: str,
-    model: str | None = None,
-) -> bytes:
-    selected_model = str(model or OPENROUTER_IMAGE_MODEL).strip()
-    if not selected_model:
-        raise RuntimeError(
-            "No OpenRouter image model is configured for the selected API key."
-        )
+@app.post("/api/images/description")
+async def describe_generated_image(payload: dict = Body(...)):
+    filename = Path(str(payload.get("filename", ""))).name
+    prompt = str(payload.get("prompt", "")).strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="Generated image filename is required.")
 
-    payload = {
-        "model": selected_model,
-        "prompt": instruction,
-        "input_references": [
-            {
-                "type": "image_url",
-                "image_url": {"url": _image_data_url(path)},
-            }
-            for path in paths
-        ],
-        "output_format": "png",
-    }
+    image_path = IMAGE_OUTPUT_DIR / filename
+    if not image_path.exists() or not image_path.is_file() or not is_valid_image_file(image_path):
+        raise HTTPException(status_code=404, detail="Generated image was not found or is not a valid image.")
 
-    result = _openrouter_request(
-        api_key,
-        "images",
-        payload,
-        timeout=240,
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+    if not selected_candidates:
+        raise HTTPException(status_code=400, detail="Select at least one image-capable API key before generating a description.")
+
+    errors = []
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            description = _pipeline_description(pipeline_item, image_path, prompt)
+            if description:
+                API_KEY_STATE["pipeline_key_id"] = key_id
+                return {
+                    "success": True,
+                    "description": description,
+                    "api_id": key_id,
+                    "provider": pipeline_item.get("display_name", "Selected API"),
+                }
+        except Exception as exc:
+            errors.append(f"{pipeline_item.get('display_name', key_id)}: {exc}")
+
+    fallback = (
+        f"Generated image based on the requested content: {prompt}"
+        if prompt
+        else "Generated image created successfully from the selected reference."
     )
-    data = result.get("data") or []
-    if not data:
-        raise RuntimeError("OpenRouter returned no image output.")
+    return {
+        "success": True,
+        "description": fallback,
+        "api_id": "fallback",
+        "provider": "Generated-image fallback",
+        "warning": " | ".join(errors),
+    }
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """
+    Generate social-media content for an already generated image.
 
-    first = data[0]
-    if first.get("b64_json"):
-        return base64.b64decode(first["b64_json"])
-    if first.get("url"):
-        with urlopen(first["url"], timeout=120) as response:
-            return response.read()
+    This endpoint is intentionally separate from the image-generation
+    pipeline. It uses the generated PNG already stored in IMAGE_OUTPUT_DIR.
+    """
 
-    raise RuntimeError("OpenRouter returned no image data.")
+    safe_name = Path(filename).name
 
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    # The frontend sends the filename returned by /api/images/generate.
+    # Check the exact same output directory used by image generation.
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Generated image '{safe_name}' was not found on the backend. "
+                "Generate the image again before generating its social-media description."
+            ),
+        )
+
+    if not is_valid_image_file(image_path):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Generated image '{safe_name}' exists but is not a readable image."
+            ),
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
+    errors = []
+
+    social_instruction = (
+        "Analyze the supplied generated image and create social-media content "
+        "for it.\n\n"
+
+        "Return EXACTLY these four sections:\n\n"
+
+        "[LINKEDIN]\n"
+        "Write a professional LinkedIn post based on the visible image "
+        "and the user's content request. Keep it concise and professional.\n\n"
+
+        "[X / TWITTER]\n"
+        "Write a concise post suitable for X/Twitter. Keep it under 280 "
+        "characters when possible.\n\n"
+
+        "[FACEBOOK]\n"
+        "Write an engaging Facebook post based on the visible image.\n\n"
+
+        "[INSTAGRAM]\n"
+        "Write an engaging Instagram caption with relevant hashtags.\n\n"
+
+        "Do not invent facts that are not visible in the image.\n"
+        "Do not describe objects that cannot reasonably be seen.\n\n"
+
+        f"User's content request: {prompt.strip()}"
+    )
+
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            service = str(
+                pipeline_item.get("service", "other")
+            ).strip().lower()
+
+            key = str(
+                pipeline_item.get("value", "")
+            ).strip()
+
+            if not key:
+                raise RuntimeError(
+                    "The selected API key is empty."
+                )
+
+            # ---------------------------------------------------------
+            # OpenRouter
+            # ---------------------------------------------------------
+            if service == "openrouter":
+
+                text = _openrouter_chat_with_image(
+                    key,
+                    image_path,
+                    social_instruction,
+                    _provider_text_model(pipeline_item),
+                )
+
+            # ---------------------------------------------------------
+            # Gemini
+            # ---------------------------------------------------------
+            elif service == "gemini":
+
+                from google import genai
+                from google.genai import types
+
+                client = genai.Client(
+                    api_key=key
+                )
+
+                response = client.models.generate_content(
+                    model=_provider_text_model(pipeline_item),
+                    contents=[
+                        types.Part.from_text(
+                            text=social_instruction
+                        ),
+                        types.Part.from_bytes(
+                            data=image_path.read_bytes(),
+                            mime_type=get_mime_type(image_path),
+                        ),
+                    ],
+                )
+
+                text = str(
+                    getattr(response, "text", "") or ""
+                ).strip()
+
+                # Defensive extraction for Gemini SDK responses
+                # where response.text is unavailable.
+                if not text:
+
+                    response_candidates = []
+
+                    candidates = getattr(
+                        response,
+                        "candidates",
+                        None,
+                    )
+
+                    if candidates:
+                        for candidate in candidates:
+
+                            candidate_content = getattr(
+                                candidate,
+                                "content",
+                                None,
+                            )
+
+                            parts = getattr(
+                                candidate_content,
+                                "parts",
+                                None,
+                            ) or []
+
+                            for part in parts:
+
+                                part_text = getattr(
+                                    part,
+                                    "text",
+                                    None,
+                                )
+
+                                if part_text:
+                                    response_candidates.append(
+                                        str(part_text)
+                                    )
+
+                    text = "\n".join(
+                        response_candidates
+                    ).strip()
+
+            # ---------------------------------------------------------
+            # Other configured providers
+            # ---------------------------------------------------------
+            else:
+
+                text = _generic_chat_with_image(
+                    pipeline_item,
+                    image_path,
+                    social_instruction,
+                )
+
+            if not text:
+                raise RuntimeError(
+                    "The selected API returned an empty "
+                    "social-media description."
+                )
+
+            # Save the generated description locally.
+            description_name = (
+                f"{Path(safe_name).stem}_description.txt"
+            )
+
+            description_path = (
+                IMAGE_OUTPUT_DIR / description_name
+            )
+
+            description_path.write_text(
+                text,
+                encoding="utf-8",
+            )
+
+            API_KEY_STATE["pipeline_key_id"] = key_id
+
+            return {
+                "success": True,
+                "filename": safe_name,
+                "content": text,
+                "description": text,
+                "social_media_filename": description_name,
+                "social_media_file_url": (
+                    f"/api/social-media/output/"
+                    f"{quote(description_name)}"
+                ),
+                "provider": pipeline_item.get(
+                    "display_name",
+                    "Selected API",
+                ),
+                "model": _provider_text_model(
+                    pipeline_item
+                ),
+                "api_id": key_id,
+                "word_count": len(text.split()),
+                "message": (
+                    "Social-media description generated "
+                    "successfully."
+                ),
+            }
+
+        except Exception as exc:
+
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "Unable to generate the social-media description "
+            "using the selected API keys. "
+            + " | ".join(errors)
+        ),
+    )
+@app.get("/api/social-media/output/{filename}")
+def get_social_media_file(filename: str):
+    path = IMAGE_OUTPUT_DIR / Path(filename).name
+
+    if (
+        not path.exists()
+        or not path.is_file()
+        or path.suffix.lower() != ".txt"
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Social-media text file was not found.",
+        )
+
+    return FileResponse(
+        path,
+        media_type="text/plain; charset=utf-8",
+        filename=path.name,
+    )
+@app.post("/api/social-media/save-to-drive")
+def save_social_media_description_to_drive(
+    filename: str = Form(...)
+):
+    """Save only the generated social-media TXT file into Google Drive/outputs."""
+
+    require_drive_configuration()
+
+    safe_name = Path(filename).name
+
+    if not safe_name or not safe_name.lower().endswith(".txt"):
+        raise HTTPException(
+            status_code=400,
+            detail="A valid social-media description filename is required.",
+        )
+
+    local_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if not local_path.exists() or not local_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The social-media description file was not found on the server.",
+        )
+
+    try:
+        service = get_drive_service()
+
+        parent_folder_id = resolve_drive_folder_id(
+            service,
+            normalize_drive_folder_id(
+                API_KEY_STATE.get("drive_folder_id", "")
+            ),
+            str(
+                API_KEY_STATE.get("drive_folder_name", "")
+                or ""
+            ),
+        )
+
+        outputs_folder_id = ensure_drive_outputs_folder(
+            service,
+            parent_folder_id,
+        )
+
+        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
+        API_KEY_STATE["drive_output_folder_name"] = "outputs"
+
+        persist_drive_configuration()
+
+        escaped_name = safe_name.replace(
+            chr(39),
+            chr(92) + chr(39),
+        )
+
+        existing = (
+            service.files()
+            .list(
+                q=(
+                    f"'{outputs_folder_id}' in parents "
+                    f"and name = '{escaped_name}' "
+                    "and trashed = false"
+                ),
+                pageSize=10,
+                fields="files(id,name,webViewLink)",
+            )
+            .execute()
+            .get("files", [])
+        )
+
+        media = MediaIoBaseUpload(
+            io.BytesIO(local_path.read_bytes()),
+            mimetype="text/plain",
+            resumable=False,
+        )
+
+        if existing:
+            drive_file = (
+                service.files()
+                .update(
+                    fileId=existing[0]["id"],
+                    media_body=media,
+                    fields="id,name,webViewLink",
+                )
+                .execute()
+            )
+        else:
+            drive_file = (
+                service.files()
+                .create(
+                    body={
+                        "name": safe_name,
+                        "parents": [outputs_folder_id],
+                    },
+                    media_body=media,
+                    fields="id,name,webViewLink",
+                )
+                .execute()
+            )
+
+        return {
+            "success": True,
+            "filename": safe_name,
+            "drive_file_id": drive_file.get("id", ""),
+            "drive_folder": "outputs",
+            "drive_url": drive_file.get(
+                "webViewLink",
+                "",
+            ),
+            "message": (
+                "Social-media description saved "
+                "to Google Drive/outputs."
+            ),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to save the social-media description "
+                f"to Google Drive: {exc}"
+            ),
+        ) from exc    
 @app.post("/api/images/generate")
 async def generate_output_image(
     source_type: str = Form(...),
@@ -3495,7 +3428,6 @@ async def generate_output_image(
     content_type: str = Form(""),
     prompt: str = Form(...),
     template_json: str = Form("{}"),
-    references_json: str = Form(""),
 ):
     if not prompt.strip():
         raise HTTPException(
@@ -3503,136 +3435,91 @@ async def generate_output_image(
             detail="Enter a content prompt before generating the output image.",
         )
 
-    # Do not force one selected API to perform the entire pipeline.
-    # For example, Claude can handle template/prompt analysis while Gemini,
-    # OpenAI, OpenRouter, or a configured custom provider handles the image.
-    image_candidates = _selected_stage_candidates("image")
-    if not image_candidates:
-        raise HTTPException(
-            status_code=400,
-            detail=_stage_capability_message(
-                "image",
-                API_KEY_STATE.get("selected_ids", []),
-            ),
-        )
-
-    # Resolve every selected reference. Google Drive IDs are downloaded by the
-    # backend, so the browser never needs to send image bytes or Drive URLs.
-    reference_entries: list[tuple[int, Path, str]] = []
-    if references_json.strip():
-        try:
-            raw_references = json.loads(references_json)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail="Invalid references_json payload.") from exc
-
-        if not isinstance(raw_references, list) or not raw_references:
-            raise HTTPException(status_code=400, detail="At least one reference image is required.")
-
-        seen_reference_numbers: set[int] = set()
-
-        for position, item in enumerate(raw_references, start=1):
-            if not isinstance(item, dict):
-                raise HTTPException(status_code=400, detail="Invalid reference entry.")
-
-            raw_number = item.get("number")
-            try:
-                item_number = int(raw_number) if raw_number is not None else position
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Reference number must be an integer (received: {raw_number!r}).",
-                ) from exc
-
-            if item_number < 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Reference number must be 1 or greater (received: {item_number}).",
-                )
-
-            if item_number in seen_reference_numbers:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Duplicate reference number: {item_number}.",
-                )
-            seen_reference_numbers.add(item_number)
-
-            item_source_type = str(item.get("source_type") or "").strip().lower()
-            item_source = str(item.get("source") or "").strip()
-            item_filename = str(item.get("filename") or f"reference_{item_number}.png")
-            item_content_type = str(item.get("content_type") or "")
-            if not item_source:
-                raise HTTPException(status_code=400, detail=f"Reference {item_number} has no source.")
-
-            path, _ = _resolve_generation_reference(
-                item_source_type, item_source, item_filename, item_content_type
-            )
-            reference_entries.append((item_number, path, item_filename))
-    else:
-        reference_path, _ = _resolve_generation_reference(
-            source_type, source, filename, content_type
-        )
-        reference_entries = [(1, reference_path, filename)]
-
-    reference_paths = _prepare_reference_paths(reference_entries)
-    reference_map = "; ".join(
-        f"{number} = {name}" for number, _, name in reference_entries
+    # Require at least one selected image-capable key, then try selected keys
+    # in order. A failed/limited key must not block another selected key.
+    _require_pipeline_key()
+    reference_path, _ = _resolve_generation_reference(
+        source_type, source, filename, content_type
     )
-    instruction = _generation_instruction(
-        prompt,
-        template_json,
-        reference_map=reference_map,
-    )
+    instruction = _generation_instruction(prompt, template_json)
 
-    errors: list[str] = []
-    key_id = ""
-    item: dict = {}
-    image_bytes: bytes | None = None
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+    errors = []
+    image_bytes = None
     image_model = ""
+    key_id = ""
+    item = None
 
-    # Try each selected image-capable credential once. This means a quota-limited
-    # Gemini key does not prevent a second selected image provider from working.
-    for candidate_id, candidate_item in image_candidates:
+    for candidate_id, candidate_item in selected_candidates:
         try:
-            key_id = candidate_id
-            item = candidate_item
-            image_bytes, image_model = _pipeline_image(
+            candidate_bytes, candidate_model = _pipeline_image(
                 candidate_item,
-                reference_paths,
+                reference_path,
                 instruction,
             )
+            image_bytes = candidate_bytes
+            image_model = candidate_model
+            key_id = candidate_id
+            item = candidate_item
             API_KEY_STATE["pipeline_key_id"] = candidate_id
             break
         except Exception as exc:
-            provider_name = str(
-                candidate_item.get("display_name", candidate_id)
-            )
-            if _exception_is_quota_error(exc):
-                errors.append(
-                    f"{provider_name}: quota/rate limit exceeded ({exc})"
-                )
-            else:
-                errors.append(f"{provider_name}: {exc}")
-
-    if image_bytes is None:
-        if errors and all(_exception_is_quota_error(RuntimeError(error)) for error in errors):
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    "All selected image-capable API keys are currently unavailable "
-                    "because of quota or rate limits. " + " | ".join(errors)
-                ),
+            errors.append(
+                f"{candidate_item.get('display_name', candidate_id)}: {exc}"
             )
 
+    if image_bytes is None or item is None:
+        detail = " | ".join(errors) if errors else "No selected API key can generate images."
         raise HTTPException(
             status_code=502,
             detail=(
                 "Image generation failed for all selected image-capable API keys. "
-                + " | ".join(errors)
+                f"{detail}"
             ),
         )
 
     output_name = _safe_output_name(filename)
-    (IMAGE_OUTPUT_DIR / output_name).write_bytes(image_bytes)
+    output_path = IMAGE_OUTPUT_DIR / output_name
+    output_path.write_bytes(image_bytes)
+
+    # Description is part of the final generation transaction so it cannot be
+    # silently lost after an otherwise successful image generation. Try the
+    # API key that actually generated the image first, then the other selected
+    # image-capable keys. A description failure must never delete/block the
+    # generated image.
+    description = ""
+    description_errors = []
+    description_candidates = [(key_id, item)]
+    for candidate_id, candidate_item in selected_candidates:
+        if candidate_id != key_id:
+            description_candidates.append((candidate_id, candidate_item))
+
+    for description_key_id, description_item in description_candidates:
+        try:
+            description = _pipeline_description(
+                description_item, output_path, prompt.strip()
+            )
+            if description:
+                break
+        except Exception as exc:
+            description_errors.append(
+                f"{description_item.get('display_name', description_key_id)}: {exc}"
+            )
+
+    # Always return a visible description string even if every selected AI
+    # provider refuses the vision-description request. This fallback describes
+    # the generated asset from the user's actual request rather than inventing
+    # visual details.
+    if not description:
+        description = (
+            f"Generated image based on the requested content: {prompt.strip()}"
+            if prompt.strip()
+            else "Generated image created successfully from the selected reference."
+        )
 
     return {
         "success": True,
@@ -3643,10 +3530,126 @@ async def generate_output_image(
         "api_id": key_id,
         "pipeline_api_id": key_id,
         "selected_api_count": len(API_KEY_STATE.get("selected_ids", [])),
+        "description": description,
+        "description_provider": (
+            item.get("display_name", "Selected API")
+            if not description_errors
+            else "Generated-image fallback"
+        ),
+        "description_warning": " | ".join(description_errors) if description_errors else "",
         "changes": {},
     }
 
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """
+    Compatibility endpoint used by the existing frontend Generate Description
+    button.
 
+    It generates a description from the already-generated image without
+    modifying the existing image-generation pipeline.
+    """
+
+    safe_name = Path(filename).name
+
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if (
+        not image_path.exists()
+        or not image_path.is_file()
+        or not is_valid_image_file(image_path)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found or is not a valid image.",
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item
+        in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
+    errors = []
+
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            description = _pipeline_description(
+                pipeline_item,
+                image_path,
+                prompt.strip(),
+            )
+
+            if description:
+                API_KEY_STATE["pipeline_key_id"] = key_id
+
+                return {
+                    "success": True,
+                    "filename": safe_name,
+                    "description": description,
+                    "content": description,
+                    "provider": pipeline_item.get(
+                        "display_name",
+                        "Selected API",
+                    ),
+                    "model": _provider_text_model(
+                        pipeline_item
+                    ),
+                    "api_id": key_id,
+                    "message": (
+                        "Generated-image description "
+                        "generated successfully."
+                    ),
+                }
+
+        except Exception as exc:
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    fallback = (
+        f"Generated image based on the requested content: "
+        f"{prompt.strip()}"
+        if prompt.strip()
+        else
+        "Generated image created successfully "
+        "from the selected reference."
+    )
+
+    return {
+        "success": True,
+        "filename": safe_name,
+        "description": fallback,
+        "content": fallback,
+        "provider": "Generated-image fallback",
+        "model": "",
+        "api_id": "fallback",
+        "warning": " | ".join(errors),
+        "message": (
+            "Generated-image description returned "
+            "using fallback text."
+        ),
+    }
 @app.get("/api/images/output/{filename}")
 def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
@@ -3654,57 +3657,13 @@ def get_generated_image(filename: str):
     return FileResponse(path,media_type="image/png",filename=path.name)
 
 
-@app.get("/api/drive/folders")
-def get_configured_drive_folders():
-    """Return the dedicated output folders supplied by the uploaded API/config file."""
-    folders = API_KEY_STATE.get("drive_output_folders", [])
-    if not isinstance(folders, list) or not folders:
-        load_persisted_drive_configuration()
-        folders = API_KEY_STATE.get("drive_output_folders", [])
-
-    result = []
-    try:
-        service = get_drive_service()
-        for index, folder in enumerate(folders, start=1):
-            if not isinstance(folder, dict):
-                continue
-            folder_id = normalize_drive_folder_id(str(folder.get("id", "") or ""))
-            folder_name = str(folder.get("name", "") or "").strip()
-            if not folder_id and not folder_name:
-                continue
-            try:
-                resolved_id = resolve_drive_folder_id(service, folder_id, folder_name)
-                metadata = service.files().get(
-                    fileId=resolved_id,
-                    fields="id,name,mimeType,trashed",
-                ).execute()
-                if metadata.get("mimeType") != "application/vnd.google-apps.folder" or metadata.get("trashed"):
-                    raise RuntimeError("Configured ID is not an active Google Drive folder.")
-                folder_id = str(metadata.get("id", resolved_id))
-                folder_name = str(metadata.get("name", folder_name or f"Google Drive {index}"))
-            except Exception as exc:
-                # Keep the configured ID visible even if metadata lookup fails;
-                # the save endpoint will provide the actionable Drive error.
-                print(f"Unable to resolve configured output folder {folder_id or folder_name}: {exc}")
-                folder_name = folder_name or f"Google Drive Output {index}"
-            result.append({
-                "id": folder_id,
-                "name": folder_name,
-                "label": folder_name or f"Google Drive Output {index}",
-            })
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Unable to load configured Google Drive output folders: {exc}",
-        ) from exc
-
-    return {"folders": result}
-
-
 @app.post("/api/images/save-to-drive")
-def save_generated_image_to_drive(filename: str = Form(...), folder_id: str = Form("")):
-    """Save a generated local image into the `outputs` folder under the Drive reference folder."""
-    require_drive_configuration()
+def save_generated_image_to_drive(
+    filename: str = Form(...),
+    folder_id: str = Form(""),
+):
+    """Save a generated local image into an `outputs` folder under the selected Drive folder."""
+    configured_folder_id, configured_folder_name = require_drive_configuration()
     safe_name = Path(filename).name
     if not safe_name:
         raise HTTPException(status_code=400, detail="Generated image filename is required.")
@@ -3716,23 +3675,11 @@ def save_generated_image_to_drive(filename: str = Form(...), folder_id: str = Fo
     try:
         service = get_drive_service()
         requested_folder_id = normalize_drive_folder_id(folder_id)
-        configured_outputs = API_KEY_STATE.get("drive_output_folders", []) or []
-        allowed_ids = {
-            normalize_drive_folder_id(str(item.get("id", "") or ""))
-            for item in configured_outputs
-            if isinstance(item, dict) and item.get("id")
-        }
-        if not requested_folder_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Select one of the configured Google Drive output folders before saving.",
-            )
-        if requested_folder_id not in allowed_ids:
-            raise HTTPException(
-                status_code=400,
-                detail="The selected Google Drive output folder was not provided in the uploaded API key file.",
-            )
-        parent_folder_id = requested_folder_id
+        parent_folder_id = requested_folder_id or resolve_drive_folder_id(
+            service,
+            configured_folder_id,
+            configured_folder_name,
+        )
         outputs_folder_id = ensure_drive_outputs_folder(service, parent_folder_id)
         API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
         API_KEY_STATE["drive_output_folder_name"] = "outputs"
@@ -3773,9 +3720,8 @@ def save_generated_image_to_drive(filename: str = Form(...), folder_id: str = Fo
             "filename": safe_name,
             "drive_file_id": drive_file.get("id", ""),
             "drive_folder": "outputs",
-            "parent_folder_id": parent_folder_id,
             "drive_url": drive_file.get("webViewLink", ""),
-            "message": "Generated image saved to the selected Google Drive/outputs folder.",
+            "message": "Generated image saved to Google Drive/outputs.",
         }
     except HTTPException:
         raise
@@ -3811,7 +3757,7 @@ async def generate_prompt_with_ai(
 
     source = source.strip()
 
-    key_id, pipeline_item = _require_pipeline_key("text")
+    key_id, pipeline_item = _require_pipeline_key()
 
     def run_prompt(**kwargs):
         return _pipeline_prompt(pipeline_item, **kwargs)
@@ -4121,7 +4067,7 @@ async def generate_template_endpoint(
             detail="Unsupported reference source.",
         )
 
-    key_id, pipeline_item = _require_pipeline_key("text")
+    key_id, pipeline_item = _require_pipeline_key()
 
     def run_template(**kwargs):
         return _pipeline_template(pipeline_item, **kwargs)
@@ -4410,22 +4356,3 @@ async def generate_template_endpoint(
                 f"{exc}"
             ),
         ) from exc
-
-# -------------------------------------------------------------------
-# Outermost CORS wrapper
-# -------------------------------------------------------------------
-# Wrapping the complete FastAPI application ensures CORS headers are also
-# present when an unexpected exception escapes the route/middleware stack.
-# Without this, the browser can report a misleading CORS error for a real
-# backend 500 response.
-app = CORSMiddleware(
-    app,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-         "https://frontend-production-14d5.up.railway.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
