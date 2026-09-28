@@ -1527,6 +1527,9 @@ function ImageGenerator({
     character_count: number;
     character_limit: number;
     word_count?: number;
+    target_word_count?: number;
+    minimum_word_count?: number;
+    maximum_word_count?: number;
   };
 
   const [socialDescriptions, setSocialDescriptions] =
@@ -3505,7 +3508,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened in a new tab. After you approve access, Canva will open the generated image automatically.",
+        "Canva authorization opened in a new tab. Approve access; the generated image will then continue into Canva automatically.",
       );
       return;
     }
@@ -3553,7 +3556,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     setCanvaMessage(
       String(
         data.message ||
-          "Editable Canva design created successfully.",
+          "Generated image opened in Canva as one editable image.",
       ),
     );
 
@@ -3648,11 +3651,11 @@ const handleOpenGeneratedImageInCanva = async () => {
         const rawContent =
           String(data?.content || "").trim();
 
-        const limits: Record<string, number> = {
-          "[LINKEDIN]": 3000,
-          "[X / TWITTER]": 280,
-          "[FACEBOOK]": 10000,
-          "[INSTAGRAM]": 2200,
+        const limits: Record<string, { character: number; target: number; minimum: number; maximum: number }> = {
+          "[LINKEDIN]": { character: 3000, target: 180, minimum: 165, maximum: 195 },
+          "[X / TWITTER]": { character: 280, target: 35, minimum: 30, maximum: 40 },
+          "[FACEBOOK]": { character: 10000, target: 160, minimum: 145, maximum: 175 },
+          "[INSTAGRAM]": { character: 2200, target: 150, minimum: 135, maximum: 165 },
         };
 
         const headings = Object.keys(limits);
@@ -3721,9 +3724,18 @@ const handleOpenGeneratedImageInCanva = async () => {
           if (content) {
             parsed[platform] = {
               text: content,
-              character_count: content.length,
-              character_limit: limits[heading],
-              word_count: content.split(/\s+/).filter(Boolean).length,
+              character_count:
+                content.length,
+              character_limit:
+                limits[heading].character,
+              word_count:
+                content.split(/\s+/).filter(Boolean).length,
+              target_word_count:
+                limits[heading].target,
+              minimum_word_count:
+                limits[heading].minimum,
+              maximum_word_count:
+                limits[heading].maximum,
             };
           }
         });
@@ -6030,21 +6042,22 @@ const handleOpenGeneratedImageInCanva = async () => {
 
                 )}
 
-
+                
 <div
   style={{
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
+    alignItems: "center",
     marginTop: "16px",
-    marginBottom: "4px",
-    width: "100%",
+    paddingTop: "14px",
+    borderTop: "1px solid rgba(255,255,255,0.08)",
   }}
 >
   <button
     type="button"
     onClick={handleOpenGeneratedImageInCanva}
-    disabled={!generatedImageFilename || isCreatingCanvaDesign}
+    disabled={isCreatingCanvaDesign || !generatedImageFilename}
     aria-label="Edit generated image in Canva"
     style={{
       display: "inline-flex",
@@ -6053,22 +6066,25 @@ const handleOpenGeneratedImageInCanva = async () => {
       gap: "8px",
       minHeight: "42px",
       padding: "10px 18px",
-      border: "0",
       borderRadius: "10px",
+      border: "1px solid rgba(123, 92, 255, 0.45)",
+      background: isCreatingCanvaDesign
+        ? "rgba(123, 92, 255, 0.25)"
+        : "linear-gradient(135deg, #7b4dff, #4f8cff)",
+      color: "#fff",
       fontWeight: 800,
-      fontSize: "14px",
-      color: "#ffffff",
-      background: "linear-gradient(135deg, #7c3aed, #06b6d4)",
+      fontSize: "13px",
       cursor: isCreatingCanvaDesign ? "wait" : "pointer",
-      opacity: !generatedImageFilename ? 0.55 : 1,
-      boxShadow: "0 8px 20px rgba(124, 58, 237, 0.22)",
+      boxShadow: "0 8px 24px rgba(79, 76, 255, 0.22)",
+      opacity: isCreatingCanvaDesign || !generatedImageFilename ? 0.7 : 1,
     }}
   >
     <span aria-hidden="true">✎</span>
-    {isCreatingCanvaDesign
-      ? "Opening Canva..."
-      : "Edit in Canva"}
+    {isCreatingCanvaDesign ? "Opening Canva..." : "Edit in Canva"}
   </button>
+  <span style={{ fontSize: "11px", opacity: 0.62 }}>
+    Opens the generated image as one editable image in Canva.
+  </span>
 </div>
 
 {canvaMessage && (
@@ -6147,17 +6163,6 @@ const handleOpenGeneratedImageInCanva = async () => {
       }}
     >
       Generate platform-specific descriptions from the final generated image.
-      The system targets longer, platform-appropriate word counts instead of
-      returning very short captions.
-    </p>
-    <p
-      style={{
-        margin: "7px 0 0",
-        fontSize: "11px",
-        opacity: 0.62,
-      }}
-    >
-      Target length: LinkedIn ~150 words · X ~35 words · Facebook ~140 words · Instagram ~120 words.
     </p>
   </div>
 
@@ -6269,8 +6274,10 @@ const handleOpenGeneratedImageInCanva = async () => {
             }}
           >
             <strong>{platform}</strong>
-            <span style={{ opacity: 0.65 }}>
-              {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words · {item.character_count} / {item.character_limit} chars
+            <span style={{ opacity: 0.65, textAlign: "right" }}>
+              {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
+              {item.target_word_count ? ` / ~${item.target_word_count}` : ""}
+              {" · "}{item.character_count} / {item.character_limit} chars
             </span>
           </div>
 
@@ -6611,8 +6618,9 @@ const handleOpenGeneratedImageInCanva = async () => {
                         fontSize: "12px",
                       }}
                     >
-                      {item.character_count} /{" "}
-                      {item.character_limit}
+                      {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
+                      {item.target_word_count ? ` / ~${item.target_word_count}` : ""}
+                      {" · "}{item.character_count} / {item.character_limit} chars
                     </span>
                   </div>
 
