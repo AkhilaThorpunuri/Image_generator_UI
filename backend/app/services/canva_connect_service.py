@@ -413,8 +413,7 @@ class CanvaConnectService:
         raise RuntimeError(
             f"Timed out waiting for Canva to import '{path.name}'."
         )
-
-            async def create_editable_design_from_local_image(
+    async def create_editable_design_from_local_image(
         self,
         local_path: Path,
     ) -> dict:
