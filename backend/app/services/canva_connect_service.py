@@ -414,10 +414,123 @@ class CanvaConnectService:
             f"Timed out waiting for Canva to import '{path.name}'."
         )
 
-        async def create_editable_design_from_local_image(
+            async def create_editable_design_from_local_image(
         self,
         local_path: Path,
     ) -> dict:
+        """Create a Canva design from a local generated image.
+
+        Preferred mode:
+          1. Upload local image bytes directly to Canva Connect.
+          2. Copy CANVA_EDITABLE_TEMPLATE_DESIGN_ID.
+          3. Use Canva MCP to replace the template's first editable image
+             element with the uploaded generated image.
+          4. Commit the change.
+          5. Return the Canva edit URL.
+
+        Fallback mode:
+          - Upload the local image directly.
+          - Create a Canva design containing that image as one raster element.
+        """
+        path = Path(local_path)
+
+        if not path.exists() or not path.is_file():
+            raise RuntimeError(
+                "Generated image was not found on the server."
+            )
+
+        asset_id = await self.upload_asset(path)
+
+        template_id = self.editable_template_design_id
+
+        if template_id:
+            copied = await self.create_design_copy(
+                template_id,
+                page_numbers=[1],
+            )
+
+            design_id = str(
+                copied.get("design_id") or ""
+            ).strip()
+
+            if not design_id:
+                raise RuntimeError(
+                    "Canva copied the editable template but returned no design ID."
+                )
+
+            try:
+                mcp_sync = await self._attach_asset_to_template_with_mcp(
+                    design_id=design_id,
+                    asset_id=asset_id,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "The editable Canva template was copied, but the generated image "
+                    f"could not be inserted into its image placeholder: {exc}"
+                ) from exc
+
+            return {
+                "success": True,
+                "design_id": design_id,
+                "edit_url": str(
+                    copied.get("edit_url") or ""
+                ),
+                "view_url": str(
+                    copied.get("view_url") or ""
+                ),
+                "asset_id": asset_id,
+                "template_design_id": template_id,
+                "title": (
+                    copied.get("design", {}).get("title")
+                    or path.stem
+                ),
+                "editable_scope": (
+                    "template-elements-plus-generated-image-element"
+                ),
+                "canva_ai_ready": True,
+                "public_tunnel_required": False,
+                "message": (
+                    "An editable Canva design was created from your template. "
+                    "The generated image was inserted into the template's editable "
+                    "image element. Existing Canva text, shapes, and other template "
+                    "elements remain independently editable."
+                ),
+                "mcp_sync": mcp_sync,
+            }
+
+        # Backward-compatible raster fallback.
+        result = await self.create_design_from_asset(
+            asset_id,
+            path,
+            path.stem,
+        )
+
+        design = result.get("design") or {}
+        urls = design.get("urls") or {}
+
+        return {
+            "success": True,
+            "design_id": str(
+                design.get("id") or ""
+            ),
+            "edit_url": str(
+                urls.get("edit_url") or ""
+            ),
+            "view_url": str(
+                urls.get("view_url") or ""
+            ),
+            "asset_id": asset_id,
+            "title": design.get("title") or path.stem,
+            "editable_scope": "raster-image-element",
+            "canva_ai_ready": True,
+            "public_tunnel_required": False,
+            "message": (
+                "The generated image was uploaded directly to Canva. "
+                "For fully editable text/shape elements, configure "
+                "CANVA_EDITABLE_TEMPLATE_DESIGN_ID with a Canva template "
+                "that contains editable placeholders."
+            ),
+        }
         """Create an editable Canva design from the generated image."""
 
         asset_id = await self.upload_asset(local_path)
