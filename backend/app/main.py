@@ -3268,11 +3268,40 @@ async def generate_social_media_description(
     # Word-oriented targets plus presentation metadata. The model returns JSON so
     # the UI can render the icon, content, and tags separately.
     targets = {
-        "LinkedIn": {"heading": "[LINKEDIN]", "icon": "💼", "target": 180, "minimum": 165, "maximum": 195, "characters": 3000},
-        "X / Twitter": {"heading": "[X / TWITTER]", "icon": "𝕏", "target": 35, "minimum": 30, "maximum": 40, "characters": 280},
-        "Facebook": {"heading": "[FACEBOOK]", "icon": "f", "target": 160, "minimum": 145, "maximum": 175, "characters": 10000},
-        "Instagram": {"heading": "[INSTAGRAM]", "icon": "◎", "target": 150, "minimum": 135, "maximum": 165, "characters": 2200},
+        "LinkedIn": {"heading": "[LINKEDIN]", "icon": "✨", "target": 180, "minimum": 165, "maximum": 195, "characters": 3000},
+        "X / Twitter": {"heading": "[X / TWITTER]", "icon": "✨", "target": 35, "minimum": 30, "maximum": 40, "characters": 280},
+        "Facebook": {"heading": "[FACEBOOK]", "icon": "✨", "target": 160, "minimum": 145, "maximum": 175, "characters": 10000},
+        "Instagram": {"heading": "[INSTAGRAM]", "icon": "✨", "target": 150, "minimum": 135, "maximum": 165, "characters": 2200},
     }
+
+    def infer_social_icon(text: str, tags: list[str] | None = None) -> str:
+        value = f"{text} {' '.join(tags or [])}".lower()
+        rules = [
+            (("ai", "artificial intelligence", "machine learning", "robot", "automation", "technology", "software", "coding", "developer", "digital", "cyber", "data"), "🤖"),
+            (("food", "recipe", "restaurant", "cooking", "chef", "meal", "pizza", "burger", "dessert", "coffee", "cuisine"), "🍽️"),
+            (("travel", "tourism", "vacation", "destination", "beach", "mountain", "hotel", "flight", "adventure"), "✈️"),
+            (("fitness", "gym", "workout", "exercise", "health", "running", "yoga", "sport", "athlete"), "💪"),
+            (("nature", "forest", "tree", "flower", "garden", "landscape", "wildlife", "ocean", "sunset", "sunrise"), "🌿"),
+            (("fashion", "clothing", "style", "dress", "beauty", "makeup", "jewelry", "outfit"), "✨"),
+            (("business", "startup", "finance", "marketing", "sales", "career", "leadership", "office", "professional"), "💡"),
+            (("education", "learning", "course", "student", "school", "college", "study", "training"), "📚"),
+            (("product", "ecommerce", "shopping", "store", "brand", "retail"), "🛍️"),
+            (("art", "creative", "design", "illustration", "photography", "visual"), "🎨"),
+        ]
+        for keywords, icon in rules:
+            if any(keyword in value for keyword in keywords):
+                return icon
+        return "✨"
+
+
+    def ensure_content_icon(text: str, icon: str) -> str:
+        content = text.strip()
+        if not content:
+            return icon
+        if re.search(r"[\U0001F300-\U0001FAFF]", content):
+            return content
+        return f"{icon} {content}"
+
 
     def normalize_tags(value, fallback_text: str = "") -> list[str]:
         if isinstance(value, list):
@@ -3316,16 +3345,22 @@ async def generate_social_media_description(
             content = str(raw_value.get("content") or raw_value.get("text") or "").strip()
             if not content:
                 continue
+            supplied_tags = normalize_tags(raw_value.get("tags"), content)
+            supplied_icon = str(raw_value.get("icon") or "").strip()
+            if supplied_icon in {"💼", "𝕏", "f", "◎", "C"}:
+                supplied_icon = ""
+            image_icon = supplied_icon or infer_social_icon(content, supplied_tags)
+            final_content = ensure_content_icon(content, image_icon)
             normalized[label] = {
-                "text": content,
-                "character_count": len(content),
+                "text": final_content,
+                "character_count": len(final_content),
                 "character_limit": info["characters"],
-                "word_count": len(content.split()),
+                "word_count": len(final_content.split()),
                 "target_word_count": info["target"],
                 "minimum_word_count": info["minimum"],
                 "maximum_word_count": info["maximum"],
-                "icon": str(raw_value.get("icon") or info["icon"]).strip() or info["icon"],
-                "tags": normalize_tags(raw_value.get("tags"), content),
+                "icon": image_icon,
+                "tags": supplied_tags,
             }
 
         if len(normalized) != 4:
@@ -3349,16 +3384,19 @@ async def generate_social_media_description(
                 continue
             label = next(name for name, info in targets.items() if info["heading"] == heading)
             info = targets[label]
+            legacy_tags = normalize_tags(None, content)
+            legacy_icon = infer_social_icon(content, legacy_tags)
+            final_content = ensure_content_icon(content, legacy_icon)
             parsed[label] = {
-                "text": content,
-                "character_count": len(content),
+                "text": final_content,
+                "character_count": len(final_content),
                 "character_limit": info["characters"],
-                "word_count": len(content.split()),
+                "word_count": len(final_content.split()),
                 "target_word_count": info["target"],
                 "minimum_word_count": info["minimum"],
                 "maximum_word_count": info["maximum"],
-                "icon": info["icon"],
-                "tags": normalize_tags(None, content),
+                "icon": legacy_icon,
+                "tags": legacy_tags,
             }
         if len(parsed) != 4:
             raise RuntimeError("The selected API returned no recognizable social-media descriptions.")
@@ -3411,18 +3449,24 @@ Use the visible image and the user's request. Do not invent facts that cannot be
 
 Return ONLY valid JSON. Do not use Markdown or code fences. Use this exact shape:
 {{
-  "LinkedIn": {{"icon": "💼", "content": "...", "tags": ["#tag1", "#tag2", "#tag3"]}},
-  "X / Twitter": {{"icon": "𝕏", "content": "...", "tags": ["#tag1", "#tag2"]}},
-  "Facebook": {{"icon": "f", "content": "...", "tags": ["#tag1", "#tag2", "#tag3"]}},
-  "Instagram": {{"icon": "◎", "content": "...", "tags": ["#tag1", "#tag2", "#tag3", "#tag4"]}}
+  "LinkedIn": {{"icon": "image-related emoji", "content": "...", "tags": ["#imageTopic", "#relevantTag"]}},
+  "X / Twitter": {{"icon": "image-related emoji", "content": "...", "tags": ["#imageTopic", "#relevantTag"]}},
+  "Facebook": {{"icon": "image-related emoji", "content": "...", "tags": ["#imageTopic", "#relevantTag"]}},
+  "Instagram": {{"icon": "image-related emoji", "content": "...", "tags": ["#imageTopic", "#relevantTag"]}}
 }}
 
 Requirements:
+- Analyze the actual generated image before writing the copy.
+- The icon MUST describe the image/topic, not the social platform. Never use 💼, 𝕏, f, ◎, or a generic platform logo as the icon.
+- Put 2-5 image/topic-related emojis naturally INSIDE each content string. Do not put the emojis only in the separate icon field.
+- Use different or context-appropriate emojis when the image calls for them; do not repeat a fixed emoji set for every platform.
+- Tags MUST describe the visible image/topic and the user's request. Keep tags in the separate tags array.
 - LinkedIn: about 180 words; acceptable range 165-195. Professional, informative, and engaging. Provide 3-6 relevant tags.
 - X / Twitter: about 35 words; acceptable range 30-40 words; the content itself must stay at or below 280 characters. Provide 2-4 relevant tags.
 - Facebook: about 160 words; acceptable range 145-175. Engaging and conversational. Provide 3-6 relevant tags.
 - Instagram: about 150 words; acceptable range 135-165. Engaging and descriptive. Provide 5-8 relevant tags.
-- Keep tags in the separate tags array; do not count tags toward the content word target.
+- Tags do not count toward the content word target.
+- Do not invent facts or objects that are not visible or reasonably supported by the user's request.
 
 User's content request:
 {prompt.strip()}
@@ -3430,7 +3474,7 @@ User's content request:
 
     revision_suffix = """
 IMPORTANT REVISION RULE:
-The previous response was too short or outside the requested word targets. Regenerate ALL FOUR JSON objects. Aim for the middle of each range. Do not return short summaries. Keep tags separate from content and keep the exact JSON shape.
+The previous response was too short or outside the requested word targets. Regenerate ALL FOUR JSON objects from the actual generated image. Aim for the middle of each range. Do not return short summaries. Put 2-5 relevant image/topic emojis INSIDE every content string, use an image/topic emoji in the icon field, and keep relevant hashtags in the tags array. Keep the exact JSON shape.
 """
 
     errors = []
@@ -3443,10 +3487,13 @@ The previous response was too short or outside the requested word targets. Regen
             parsed = parse_sections(raw)
             current_score = score(parsed)
 
-            # One automatic revision pass for this selected API when the first
-            # response is noticeably short. This keeps the user's single click
-            # workflow while improving adherence to the requested word counts.
-            if current_score == float("inf") or current_score > 25:
+            # Up to two automatic revision passes when the response is short,
+            # over target, missing image-related emojis, or outside the limits.
+            # This keeps the user's one-click workflow while making the result
+            # much closer to the requested word counts.
+            for _ in range(2):
+                if current_score != float("inf") and current_score <= 25:
+                    break
                 revised_raw = _generate_social_text(
                     pipeline_item,
                     base_instruction + revision_suffix,
@@ -3456,6 +3503,8 @@ The previous response was too short or outside the requested word targets. Regen
                 revised_score = score(revised_parsed)
                 if revised_score < current_score:
                     raw, parsed, current_score = revised_raw, revised_parsed, revised_score
+                else:
+                    break
 
             if current_score < best_score:
                 best_score = current_score
@@ -3497,7 +3546,7 @@ The previous response was too short or outside the requested word targets. Regen
         "model": _provider_text_model(pipeline_item),
         "api_id": key_id,
         "word_count": sum(int(item.get("word_count") or 0) for item in descriptions.values()),
-        "message": "Social-media descriptions generated close to their requested word counts with icons and tags.",
+        "message": "Social-media descriptions generated from the actual image, with image-related emojis/icons, relevant tags, and word counts close to the requested targets.",
     }
 
 @app.get("/api/social-media/output/{filename}")
@@ -3842,6 +3891,16 @@ def _canva_frontend_url() -> str:
     configured = str(os.getenv(CANVA_FRONTEND_URL_ENV, "") or "").strip()
     if configured:
         return configured.rstrip("/")
+
+    # Railway exposes the public frontend domain when configured. This keeps
+    # Canva OAuth error/connection redirects on the deployed application even
+    # when CANVA_FRONTEND_URL has not been added as a separate variable.
+    railway_domain = str(os.getenv("RAILWAY_PUBLIC_DOMAIN", "") or "").strip()
+    if railway_domain:
+        if not railway_domain.startswith("http://") and not railway_domain.startswith("https://"):
+            railway_domain = f"https://{railway_domain}"
+        return railway_domain.rstrip("/")
+
     return "http://localhost:5173"
 
 
