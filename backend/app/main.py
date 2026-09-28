@@ -1,14 +1,15 @@
+main.py
 from pathlib import Path
 import io
 import json
 import base64
 import os
 import re
-import hashlib
 import secrets
+import hashlib
 import time
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen, HTTPError
+from urllib.request import Request, urlopen
 
 from fastapi import (
     FastAPI,
@@ -27,7 +28,6 @@ from pydantic import BaseModel
 from fastapi.responses import (
     FileResponse,
     StreamingResponse,
-    RedirectResponse,
 )
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -152,161 +152,6 @@ API_KEY_STATE = {
     "drive_output_folder_name": "outputs",
     "gemini_model": "gemini-3.5-flash-lite",
 }
-
-
-# -------------------------------------------------------------------
-# Canva Connect configuration/state
-# -------------------------------------------------------------------
-CANVA_API_BASE = "https://api.canva.com/rest/v1"
-CANVA_AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
-CANVA_TOKEN_URL = "https://api.canva.com/rest/v1/oauth/token"
-CANVA_FRONTEND_URL = os.getenv(
-    "CANVA_FRONTEND_URL",
-    "https://frontend-production-14d5.up.railway.app",
-).strip().rstrip("/")
-CANVA_SCOPES = "asset:read asset:write design:content:write"
-CANVA_STATE = {
-    "oauth_state": "",
-    "code_verifier": "",
-    "oauth_filename": "",
-    "access_token": "",
-    "refresh_token": "",
-    "expires_at": 0.0,
-}
-
-def _canva_client_id() -> str:
-    return str(os.getenv("CANVA_CLIENT_ID") or os.getenv("CANVA_CONNECT_CLIENT_ID") or "").strip()
-
-def _canva_client_secret() -> str:
-    return str(os.getenv("CANVA_CLIENT_SECRET") or os.getenv("CANVA_CONNECT_CLIENT_SECRET") or "").strip()
-
-def _canva_redirect_uri() -> str:
-    configured = str(os.getenv("CANVA_CONNECT_REDIRECT_URI") or os.getenv("CANVA_REDIRECT_URI") or "").strip()
-    return configured or f"{CANVA_FRONTEND_URL}/api/canva/connect/oauth/callback"
-
-def _canva_configured() -> bool:
-    return bool(_canva_client_id() and _canva_client_secret() and _canva_redirect_uri())
-
-def _canva_json_request(method: str, path: str, access_token: str, payload: dict | None = None) -> dict:
-    body = None
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    request = Request(f"{CANVA_API_BASE}/{path.lstrip('/')}", data=body, method=method.upper(), headers=headers)
-    try:
-        with urlopen(request, timeout=90) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw else {}
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(detail)
-            message = parsed.get("message") or parsed.get("error") or detail
-        except Exception:
-            message = detail
-        raise RuntimeError(f"Canva API request failed ({exc.code}): {message}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Canva API request failed: {exc}") from exc
-
-def _canva_refresh_access_token() -> str:
-    refresh_token = str(CANVA_STATE.get("refresh_token") or "").strip()
-    if not refresh_token:
-        raise RuntimeError("Canva authorization has expired. Connect Canva again.")
-    credentials = base64.b64encode(f"{_canva_client_id()}:{_canva_client_secret()}".encode("utf-8")).decode("ascii")
-    body = urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token}).encode("utf-8")
-    request = Request(CANVA_TOKEN_URL, data=body, method="POST", headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
-    try:
-        with urlopen(request, timeout=60) as response:
-            token_data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"Canva token refresh failed: {exc.read().decode('utf-8', errors='replace')}") from exc
-    access_token = str(token_data.get("access_token") or "").strip()
-    if not access_token:
-        raise RuntimeError("Canva token refresh returned no access token.")
-    CANVA_STATE["access_token"] = access_token
-    CANVA_STATE["refresh_token"] = str(token_data.get("refresh_token") or refresh_token).strip()
-    CANVA_STATE["expires_at"] = time.time() + float(token_data.get("expires_in", 14400) or 14400)
-    return access_token
-
-def _canva_access_token() -> str:
-    token = str(CANVA_STATE.get("access_token") or "").strip()
-    expires_at = float(CANVA_STATE.get("expires_at") or 0)
-    if token and time.time() < expires_at - 60:
-        return token
-    if token and CANVA_STATE.get("refresh_token"):
-        return _canva_refresh_access_token()
-    raise RuntimeError("Canva is not connected. Connect Canva before editing an image.")
-
-def _canva_authorization_url(filename: str = "") -> str:
-    if not _canva_configured():
-        raise RuntimeError("Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET and CANVA_CONNECT_REDIRECT_URI in Railway.")
-    state = secrets.token_urlsafe(32)
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("utf-8")).digest()).rstrip(b"=").decode("ascii")
-    CANVA_STATE["oauth_state"] = state
-    CANVA_STATE["code_verifier"] = verifier
-    CANVA_STATE["oauth_filename"] = Path(filename).name if filename else ""
-    params = urlencode({"client_id": _canva_client_id(), "redirect_uri": _canva_redirect_uri(), "response_type": "code", "scope": CANVA_SCOPES, "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
-    return f"{CANVA_AUTHORIZE_URL}?{params}"
-
-def _canva_frontend_url() -> str:
-    return CANVA_FRONTEND_URL or "http://localhost:5173"
-
-def _create_canva_design_from_image(image_path: Path, design_type: str = "poster") -> dict:
-    token = _canva_access_token()
-    try:
-        from PIL import Image
-        with Image.open(image_path) as image:
-            width, height = image.size
-    except Exception as exc:
-        raise RuntimeError(f"Unable to read generated image dimensions: {exc}") from exc
-    if width < 40 or height < 40:
-        raise RuntimeError("The generated image is too small for a Canva design.")
-    max_dimension = 8000
-    max_area = 25_000_000
-    scale = min(1.0, max_dimension / width, max_dimension / height, (max_area / float(width * height)) ** 0.5)
-    design_width = max(40, int(round(width * scale)))
-    design_height = max(40, int(round(height * scale)))
-    image_bytes = image_path.read_bytes()
-    if len(image_bytes) >= 50 * 1024 * 1024:
-        raise RuntimeError("The generated image is larger than Canva's 50 MB image asset limit.")
-    asset_name = image_path.stem[:50] or "Generated Image"
-    metadata = json.dumps({"name_base64": base64.b64encode(asset_name.encode("utf-8")).decode("ascii")})
-    upload_request = Request(f"{CANVA_API_BASE}/asset-uploads", data=image_bytes, method="POST", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream", "Asset-Upload-Metadata": metadata, "Content-Length": str(len(image_bytes))})
-    try:
-        with urlopen(upload_request, timeout=120) as response:
-            upload_data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"Canva asset upload failed: {exc.read().decode('utf-8', errors='replace')}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Canva asset upload failed: {exc}") from exc
-    job_id = str((upload_data.get("job") or {}).get("id") or "").strip()
-    if not job_id:
-        raise RuntimeError("Canva did not return an asset upload job ID.")
-    asset = None
-    deadline = time.time() + 90
-    while time.time() < deadline:
-        status_data = _canva_json_request("GET", f"asset-uploads/{quote(job_id, safe='')}", token)
-        current_job = status_data.get("job") or {}
-        status = str(current_job.get("status") or "").lower()
-        if status == "success":
-            asset = current_job.get("asset") or {}
-            break
-        if status == "failed":
-            error = current_job.get("error") or {}
-            raise RuntimeError(f"Canva asset upload failed: {error.get('message') or 'unknown upload error'}")
-        time.sleep(1.5)
-    asset_id = str((asset or {}).get("id") or "").strip()
-    if not asset_id:
-        raise RuntimeError("Canva asset upload did not complete in time.")
-    created = _canva_json_request("POST", "designs", token, {"type": "type_and_asset", "design_type": {"type": "custom", "width": design_width, "height": design_height}, "asset_id": asset_id, "title": f"Generated Image - {asset_name}"[:255]})
-    design = created.get("design") or {}
-    design_id = str(design.get("id") or "").strip()
-    edit_url = str((design.get("urls") or {}).get("edit_url") or "").strip()
-    if not design_id or not edit_url:
-        raise RuntimeError("Canva created the design but did not return an edit URL.")
-    return {"design_id": design_id, "edit_url": edit_url, "asset_id": asset_id}
 
 
 def persist_drive_configuration() -> None:
@@ -3296,184 +3141,883 @@ async def describe_generated_image(payload: dict = Body(...)):
     }
 
 # -------------------------------------------------------------------
-# Social-media description generation
+# Canva Connect / REST API
 # -------------------------------------------------------------------
+#
+# IMPORTANT:
+# The frontend already calls these three endpoints:
+#   /api/canva/connect/oauth/status
+#   /api/canva/connect/oauth/start
+#   /api/canva/create-from-generated-image
+#
+# This block is intentionally isolated from the existing image-generation
+# and Google Drive flow. It stores Canva OAuth state/token in the backend
+# process so the existing application flow is not changed.
+#
+CANVA_API_BASE = "https://api.canva.com/rest/v1"
+CANVA_OAUTH_AUTHORIZE = "https://www.canva.com/api/oauth/authorize"
+CANVA_OAUTH_TOKEN = "https://api.canva.com/rest/v1/oauth/token"
 
-SOCIAL_TARGETS = {
-    "LinkedIn": {"target": 190, "minimum": 175, "maximum": 200, "character_limit": 3000},
-    "X / Twitter": {"target": 38, "minimum": 30, "maximum": 45, "character_limit": 280},
-    "Facebook": {"target": 170, "minimum": 155, "maximum": 180, "character_limit": 10000},
-    "Instagram": {"target": 160, "minimum": 145, "maximum": 170, "character_limit": 2200},
+CANVA_CLIENT_ID = os.getenv("CANVA_CLIENT_ID", "").strip()
+CANVA_CLIENT_SECRET = os.getenv("CANVA_CLIENT_SECRET", "").strip()
+CANVA_CONNECT_REDIRECT_URI = os.getenv(
+    "CANVA_CONNECT_REDIRECT_URI",
+    "",
+).strip()
+
+CANVA_SCOPES = "asset:write design:content:write"
+
+CANVA_AUTH_STATE = {
+    "state": "",
+    "code_verifier": "",
+    "pending_filename": "",
+    "access_token": "",
+    "refresh_token": "",
+    "expires_at": 0.0,
 }
 
-def _word_count(text: str) -> int:
-    return len(re.findall(r"\b\w+(?:['’\-]\w+)*\b", text, flags=re.UNICODE))
 
-def _has_emoji(text: str) -> bool:
-    return bool(re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", text))
+def _canva_configured() -> bool:
+    return bool(
+        CANVA_CLIENT_ID
+        and CANVA_CLIENT_SECRET
+        and CANVA_CONNECT_REDIRECT_URI
+    )
 
-def _content_emoji(text: str) -> str:
-    value = text.lower()
-    if any(w in value for w in ("ai", "artificial intelligence", "machine learning", "robot", "automation")): return "🤖"
-    if any(w in value for w in ("technology", "software", "app", "digital", "code", "coding")): return "💻"
-    if any(w in value for w in ("business", "startup", "brand", "marketing", "professional")): return "🚀"
-    if any(w in value for w in ("food", "recipe", "restaurant", "cooking", "dish")): return "🍽️"
-    if any(w in value for w in ("travel", "trip", "vacation", "tourism", "destination")): return "🌍"
-    if any(w in value for w in ("nature", "tree", "forest", "garden", "flower", "mountain")): return "🌿"
-    if any(w in value for w in ("education", "learning", "student", "course", "study")): return "📚"
-    if any(w in value for w in ("health", "fitness", "wellness", "medical")): return "💚"
-    if any(w in value for w in ("product", "shopping", "sale", "fashion")): return "✨"
-    return "💡"
 
-def _ensure_inline_emoji(text: str, prompt: str) -> str:
-    text = str(text or "").strip()
-    if not text:
-        return text
-    words = text.split()
-    if not words:
-        return text
-    # Require at least one emoji in the middle portion of the content, not
-    # merely at the beginning/end. This directly satisfies the UI requirement
-    # that the description itself contains relevant icons.
-    emoji_positions = [
-        match.start()
-        for match in re.finditer(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", text)
-    ]
-    middle_start = max(1, int(len(text) * 0.20))
-    middle_end = max(middle_start + 1, int(len(text) * 0.80))
-    if any(middle_start <= position <= middle_end for position in emoji_positions):
-        return text
-    words.insert(max(2, min(len(words) - 1, len(words) // 2)), _content_emoji(f"{prompt} {text}"))
-    return " ".join(words)
+def _canva_basic_auth() -> str:
+    raw = f"{CANVA_CLIENT_ID}:{CANVA_CLIENT_SECRET}".encode("utf-8")
+    return "Basic " + base64.b64encode(raw).decode("ascii")
 
-def _normalize_hashtags(tags, text: str, prompt: str) -> list[str]:
-    result = []
-    if isinstance(tags, list):
-        for tag in tags:
-            tag = str(tag or "").strip()
-            if tag and not tag.startswith("#"): tag = "#" + re.sub(r"\s+", "", tag)
-            if tag and tag not in result: result.append(tag)
-    for word in re.findall(r"\b[A-Za-z][A-Za-z0-9]{3,}\b", f"{prompt} {text}"):
-        tag = "#" + word
-        if tag.lower() not in {x.lower() for x in result}: result.append(tag)
-        if len(result) >= 5: break
-    return result[:5]
 
-def _extract_social_json(raw: str) -> dict:
-    parsed = _extract_json_object(raw)
-    source = parsed.get("descriptions") if isinstance(parsed.get("descriptions"), dict) else parsed
-    if not isinstance(source, dict): raise RuntimeError("The selected API returned an invalid social-media description structure.")
-    return source
+def _canva_json_request(
+    url: str,
+    *,
+    method: str = "GET",
+    access_token: str = "",
+    payload: dict | None = None,
+    headers: dict | None = None,
+    data: bytes | None = None,
+) -> dict:
+    request_headers = dict(headers or {})
 
-def _generate_social_text(pipeline_item: dict, image_path: Path, instruction: str) -> str:
-    service = str(pipeline_item.get("service", "other")).strip().lower()
-    key = str(pipeline_item.get("value", "")).strip()
-    if not key: raise RuntimeError("The selected API key is empty.")
-    if service == "openrouter":
-        return _openrouter_chat_with_image(key, image_path, instruction, _provider_text_model(pipeline_item))
-    if service == "gemini":
-        from google import genai
-        from google.genai import types
-        client = genai.Client(api_key=key)
-        response = client.models.generate_content(model=_provider_text_model(pipeline_item), contents=[types.Part.from_text(text=instruction), types.Part.from_bytes(data=image_path.read_bytes(), mime_type=get_mime_type(image_path))])
-        text = str(getattr(response, "text", "") or "").strip()
-        if not text:
-            candidates = []
-            for candidate in getattr(response, "candidates", None) or []:
-                content = getattr(candidate, "content", None)
-                for part in getattr(content, "parts", None) or []:
-                    part_text = getattr(part, "text", None)
-                    if part_text: candidates.append(str(part_text))
-            text = "\n".join(candidates).strip()
-        if not text: raise RuntimeError("The selected Gemini API returned an empty social-media description.")
-        return text
-    return _generic_chat_with_image(pipeline_item, image_path, instruction)
+    if access_token:
+        request_headers["Authorization"] = f"Bearer {access_token}"
 
-def _social_prompt(prompt: str) -> str:
-    return f"""
-Analyze the ACTUAL GENERATED IMAGE supplied with this request and the user's content request. The generated image is the primary source of truth. Do not invent visual details.
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
 
-Return ONLY valid JSON with exactly these keys:
-{{
-  "LinkedIn": {{"text": "...", "icon": "...", "tags": ["#...", "#..."]}},
-  "X / Twitter": {{"text": "...", "icon": "...", "tags": ["#...", "#..."]}},
-  "Facebook": {{"text": "...", "icon": "...", "tags": ["#...", "#..."]}},
-  "Instagram": {{"text": "...", "icon": "...", "tags": ["#...", "#..."]}}
-}}
+    request = Request(
+        url,
+        data=data,
+        headers=request_headers,
+        method=method,
+    )
 
-STRICT CONTENT RULES:
-- The text MUST describe the actual generated image and user's request.
-- Put 2-4 relevant emojis INSIDE the text itself, naturally in the middle of sentences/paragraphs.
-- Emojis must relate to the visible subject/theme; do not use random decorative emojis.
-- Do not put all emojis only at the beginning or end.
-- The icon field must contain one primary emoji relevant to the image.
-- Tags must be relevant to the image and content, not generic platform names.
+    try:
+        with urlopen(request, timeout=60) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except Exception as exc:
+        body = ""
+        status = getattr(exc, "code", None)
 
-STRICT LENGTH RULES:
-- LinkedIn: 190 words target; 175-200 words. Aim close to 200 without exceeding 200.
-- X / Twitter: 38 words target; 30-45 words AND never exceed 280 characters. Aim close to 280 characters without exceeding it.
-- Facebook: 170 words target; 155-180 words. Aim close to 180 without exceeding 180.
-- Instagram: 160 words target; 145-170 words. Aim close to 170 without exceeding 170. Hashtags count toward the text limit.
+        try:
+            if hasattr(exc, "read"):
+                body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
 
-User's content request:
-{prompt.strip()}
-""".strip()
+        detail = body or str(exc)
+        raise RuntimeError(
+            f"Canva API request failed"
+            f"{f' ({status})' if status else ''}: {detail}"
+        ) from exc
 
-def _build_social_descriptions(raw: str, prompt: str) -> dict[str, dict]:
-    source = _extract_social_json(raw)
-    descriptions = {}
-    aliases = {"linkedin":"LinkedIn", "x / twitter":"X / Twitter", "x/twitter":"X / Twitter", "twitter":"X / Twitter", "facebook":"Facebook", "instagram":"Instagram"}
-    for raw_platform, value in source.items():
-        platform = aliases.get(str(raw_platform).strip().lower())
-        if not platform or not isinstance(value, dict): continue
-        text = str(value.get("text") or "").strip()
-        if not text: continue
-        text = _ensure_inline_emoji(text, prompt)
-        tags = _normalize_hashtags(value.get("tags"), text, prompt)
-        if platform == "Instagram" and tags and not any(tag.lower() in text.lower() for tag in tags):
-            candidate = "\n\n" + " ".join(tags)
-            if len(text) + len(candidate) <= SOCIAL_TARGETS[platform]["character_limit"]: text += candidate
-        limits = SOCIAL_TARGETS[platform]
-        descriptions[platform] = {"text": text, "character_count": len(text), "character_limit": limits["character_limit"], "word_count": _word_count(text), "target_word_count": limits["target"], "minimum_word_count": limits["minimum"], "maximum_word_count": limits["maximum"], "icon": str(value.get("icon") or "").strip() or _content_emoji(f"{prompt} {text}"), "tags": tags}
-    return descriptions
+
+def _canva_token_request(
+    *,
+    grant_type: str,
+    code: str = "",
+    refresh_token: str = "",
+    code_verifier: str = "",
+) -> dict:
+    if not _canva_configured():
+        raise RuntimeError(
+            "Canva Connect is not configured. Set "
+            "CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and "
+            "CANVA_CONNECT_REDIRECT_URI."
+        )
+
+    fields = {
+        "grant_type": grant_type,
+        "redirect_uri": CANVA_CONNECT_REDIRECT_URI,
+    }
+
+    if grant_type == "authorization_code":
+        fields["code"] = code
+        fields["code_verifier"] = code_verifier
+    elif grant_type == "refresh_token":
+        fields["refresh_token"] = refresh_token
+
+    body = urlencode(fields).encode("utf-8")
+
+    request = Request(
+        CANVA_OAUTH_TOKEN,
+        data=body,
+        headers={
+            "Authorization": _canva_basic_auth(),
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=60) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+    except Exception as exc:
+        body_text = ""
+        status = getattr(exc, "code", None)
+        try:
+            if hasattr(exc, "read"):
+                body_text = exc.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "Canva OAuth token exchange failed"
+            f"{f' ({status})' if status else ''}: "
+            f"{body_text or str(exc)}"
+        ) from exc
+
+    access_token = str(
+        payload.get("access_token") or ""
+    ).strip()
+
+    if not access_token:
+        raise RuntimeError(
+            f"Canva OAuth returned no access token: {payload}"
+        )
+
+    CANVA_AUTH_STATE["access_token"] = access_token
+
+    refresh = str(
+        payload.get("refresh_token")
+        or CANVA_AUTH_STATE.get("refresh_token")
+        or ""
+    ).strip()
+
+    CANVA_AUTH_STATE["refresh_token"] = refresh
+
+    expires_in = int(
+        payload.get("expires_in") or 14400
+    )
+
+    CANVA_AUTH_STATE["expires_at"] = (
+        time.time() + max(60, expires_in - 60)
+    )
+
+    return payload
+
+
+def _canva_access_token() -> str:
+    access_token = str(
+        CANVA_AUTH_STATE.get("access_token") or ""
+    ).strip()
+
+    expires_at = float(
+        CANVA_AUTH_STATE.get("expires_at") or 0
+    )
+
+    if access_token and time.time() < expires_at:
+        return access_token
+
+    refresh_token = str(
+        CANVA_AUTH_STATE.get("refresh_token") or ""
+    ).strip()
+
+    if refresh_token:
+        _canva_token_request(
+            grant_type="refresh_token",
+            refresh_token=refresh_token,
+        )
+        return str(
+            CANVA_AUTH_STATE.get("access_token") or ""
+        ).strip()
+
+    return ""
+
+
+def _canva_code_verifier() -> str:
+    # RFC 7636-compatible high-entropy verifier.
+    return secrets.token_urlsafe(64)[:128]
+
+
+def _canva_code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(
+        verifier.encode("ascii")
+    ).digest()
+    return base64.urlsafe_b64encode(
+        digest
+    ).rstrip(b"=").decode("ascii")
+
+
+def _canva_filename_from_query(filename: str) -> str:
+    safe = Path(
+        str(filename or "")
+    ).name.strip()
+
+    if not safe:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required for Canva.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe
+
+    if (
+        not image_path.exists()
+        or not image_path.is_file()
+        or not is_valid_image_file(image_path)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Generated image '{safe}' was not found. "
+                "Generate the image again before opening Canva."
+            ),
+        )
+
+    return safe
+
+
+def _canva_upload_asset(
+    access_token: str,
+    image_path: Path,
+) -> str:
+    # Canva's Asset Upload API expects the image bytes directly.
+    name = image_path.stem[:50] or "Generated Image"
+    name_base64 = base64.b64encode(
+        name.encode("utf-8")
+    ).decode("ascii")
+
+    request = Request(
+        f"{CANVA_API_BASE}/asset-uploads",
+        data=image_path.read_bytes(),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/octet-stream",
+            "Asset-Upload-Metadata": json.dumps(
+                {"name_base64": name_base64}
+            ),
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=120) as response:
+            payload = json.loads(
+                response.read().decode("utf-8")
+            )
+    except Exception as exc:
+        body_text = ""
+        status = getattr(exc, "code", None)
+
+        try:
+            if hasattr(exc, "read"):
+                body_text = exc.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "Canva asset upload request failed"
+            f"{f' ({status})' if status else ''}: "
+            f"{body_text or str(exc)}"
+        ) from exc
+
+    job = payload.get("job") or {}
+    job_id = str(job.get("id") or "").strip()
+    status = str(job.get("status") or "").strip()
+
+    if status == "success":
+        asset_id = str(
+            (job.get("asset") or {}).get("id") or ""
+        ).strip()
+        if asset_id:
+            return asset_id
+
+    if not job_id:
+        raise RuntimeError(
+            f"Canva did not return an asset upload job: {payload}"
+        )
+
+    # Poll the asynchronous upload job.
+    for _ in range(30):
+        time.sleep(1.0)
+
+        result = _canva_json_request(
+            f"{CANVA_API_BASE}/asset-uploads/{job_id}",
+            access_token=access_token,
+        )
+
+        current_job = result.get("job") or {}
+        current_status = str(
+            current_job.get("status") or ""
+        ).strip()
+
+        if current_status == "success":
+            asset_id = str(
+                (current_job.get("asset") or {}).get("id")
+                or ""
+            ).strip()
+
+            if asset_id:
+                return asset_id
+
+            raise RuntimeError(
+                "Canva reported successful asset upload but "
+                "did not return an asset ID."
+            )
+
+        if current_status == "failed":
+            error = current_job.get("error") or {}
+            raise RuntimeError(
+                "Canva asset upload failed: "
+                + str(
+                    error.get("message")
+                    or error.get("code")
+                    or current_job
+                )
+            )
+
+    raise RuntimeError(
+        "Canva asset upload did not finish within the allowed time."
+    )
+
+
+def _canva_create_design(
+    access_token: str,
+    image_path: Path,
+    asset_id: str,
+) -> dict:
+    # Create a custom design matching the generated image dimensions.
+    # Canva places asset_id as ONE flat image element.
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception:
+        width, height = 1080, 1080
+
+    width = max(40, min(int(width), 8000))
+    height = max(40, min(int(height), 8000))
+
+    # Canva limits custom design area to 25,000,000 pixels.
+    area = width * height
+    if area > 25_000_000:
+        scale = (25_000_000 / area) ** 0.5
+        width = max(40, int(width * scale))
+        height = max(40, int(height * scale))
+
+    payload = {
+        "type": "type_and_asset",
+        "design_type": {
+            "type": "custom",
+            "width": width,
+            "height": height,
+        },
+        "asset_id": asset_id,
+        "title": f"{image_path.stem[:230]} - Canva",
+    }
+
+    result = _canva_json_request(
+        f"{CANVA_API_BASE}/designs",
+        method="POST",
+        access_token=access_token,
+        payload=payload,
+    )
+
+    design = result.get("design") or {}
+
+    design_id = str(
+        design.get("id") or ""
+    ).strip()
+
+    urls = design.get("urls") or {}
+
+    edit_url = str(
+        urls.get("edit_url") or ""
+    ).strip()
+
+    if not design_id or not edit_url:
+        raise RuntimeError(
+            f"Canva created an unexpected design response: {result}"
+        )
+
+    return {
+        "design_id": design_id,
+        "edit_url": edit_url,
+        "asset_id": asset_id,
+    }
+
+
+def _create_canva_design_from_generated_image(
+    filename: str,
+) -> dict:
+    safe_name = _canva_filename_from_query(filename)
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    access_token = _canva_access_token()
+
+    if not access_token:
+        raise RuntimeError(
+            "Canva is not authorized. Click Edit in Canva again "
+            "to authorize Canva."
+        )
+
+    asset_id = _canva_upload_asset(
+        access_token,
+        image_path,
+    )
+
+    return _canva_create_design(
+        access_token,
+        image_path,
+        asset_id,
+    )
+
+
+@app.get("/api/canva/connect/oauth/status")
+def canva_oauth_status():
+    configured = _canva_configured()
+
+    if not configured:
+        return {
+            "configured": False,
+            "authenticated": False,
+        }
+
+    try:
+        authenticated = bool(_canva_access_token())
+    except Exception:
+        authenticated = False
+
+    return {
+        "configured": True,
+        "authenticated": authenticated,
+    }
+
+
+@app.get("/api/canva/connect/oauth/start")
+def canva_oauth_start(filename: str = ""):
+    if not _canva_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Canva Connect is not configured. Set "
+                "CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and "
+                "CANVA_CONNECT_REDIRECT_URI in Railway."
+            ),
+        )
+
+    safe_filename = _canva_filename_from_query(filename)
+
+    verifier = _canva_code_verifier()
+    state = secrets.token_urlsafe(32)
+
+    CANVA_AUTH_STATE["state"] = state
+    CANVA_AUTH_STATE["code_verifier"] = verifier
+    CANVA_AUTH_STATE["pending_filename"] = safe_filename
+
+    params = {
+        "code_challenge": _canva_code_challenge(verifier),
+        "code_challenge_method": "S256",
+        "scope": CANVA_SCOPES,
+        "response_type": "code",
+        "client_id": CANVA_CLIENT_ID,
+        "state": state,
+        "redirect_uri": CANVA_CONNECT_REDIRECT_URI,
+    }
+
+    authorization_url = (
+        CANVA_OAUTH_AUTHORIZE
+        + "?"
+        + urlencode(params)
+    )
+
+    return {
+        "configured": True,
+        "authorization_url": authorization_url,
+    }
+
+
+@app.get("/api/canva/connect/oauth/callback")
+def canva_oauth_callback(
+    code: str = "",
+    state: str = "",
+    error: str = "",
+):
+    if error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Canva authorization was not completed: {error}",
+        )
+
+    expected_state = str(
+        CANVA_AUTH_STATE.get("state") or ""
+    )
+
+    if not state or not expected_state or state != expected_state:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Canva OAuth state. Please click Edit in Canva again.",
+        )
+
+    verifier = str(
+        CANVA_AUTH_STATE.get("code_verifier") or ""
+    )
+
+    pending_filename = str(
+        CANVA_AUTH_STATE.get("pending_filename") or ""
+    )
+
+    # Consume the one-time OAuth state before making the API calls.
+    CANVA_AUTH_STATE["state"] = ""
+    CANVA_AUTH_STATE["code_verifier"] = ""
+    CANVA_AUTH_STATE["pending_filename"] = ""
+
+    try:
+        _canva_token_request(
+            grant_type="authorization_code",
+            code=code,
+            code_verifier=verifier,
+        )
+
+        created = _create_canva_design_from_generated_image(
+            pending_filename
+        )
+
+        # This is the key step: after OAuth, the same browser tab
+        # goes directly to the temporary Canva edit URL.
+        return RedirectResponse(
+            url=created["edit_url"],
+            status_code=303,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Canva authorization/design creation failed: {exc}",
+        ) from exc
+
+
+@app.post("/api/canva/create-from-generated-image")
+async def canva_create_from_generated_image(
+    filename: str = Form(...),
+    design_type: str = Form("poster"),
+):
+    del design_type  # kept for frontend backward compatibility
+
+    if not _canva_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Canva Connect is not configured. Set "
+                "CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and "
+                "CANVA_CONNECT_REDIRECT_URI in Railway."
+            ),
+        )
+
+    safe_filename = _canva_filename_from_query(filename)
+
+    try:
+        created = _create_canva_design_from_generated_image(
+            safe_filename
+        )
+
+        return {
+            "success": True,
+            "design_id": created["design_id"],
+            "edit_url": created["edit_url"],
+            "asset_id": created["asset_id"],
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to create the Canva design: {exc}",
+        ) from exc
+
+
 
 @app.post("/api/social-media/generate")
-async def generate_social_media_description(filename: str = Form(...), prompt: str = Form(""), template_json: str = Form("{}")):
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """
+    Generate social-media content for an already generated image.
+
+    This endpoint is intentionally separate from the image-generation
+    pipeline. It uses the generated PNG already stored in IMAGE_OUTPUT_DIR.
+    """
+
     safe_name = Path(filename).name
-    if not safe_name: raise HTTPException(status_code=400, detail="Generated image filename is required.")
+
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
     image_path = IMAGE_OUTPUT_DIR / safe_name
-    if not image_path.exists() or not image_path.is_file(): raise HTTPException(status_code=404, detail=f"Generated image '{safe_name}' was not found on the backend.")
-    if not is_valid_image_file(image_path): raise HTTPException(status_code=400, detail=f"Generated image '{safe_name}' is not a readable image.")
-    selected_candidates = [(candidate_id, candidate_item) for candidate_id, candidate_item in _selected_pipeline_candidates() if _pipeline_key_is_usable(candidate_item)]
-    if not selected_candidates: raise HTTPException(status_code=400, detail="Select at least one image-capable API key before generating a description.")
-    instruction = _social_prompt(prompt)
+
+    # The frontend sends the filename returned by /api/images/generate.
+    # Check the exact same output directory used by image generation.
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Generated image '{safe_name}' was not found on the backend. "
+                "Generate the image again before generating its social-media description."
+            ),
+        )
+
+    if not is_valid_image_file(image_path):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Generated image '{safe_name}' exists but is not a readable image."
+            ),
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
     errors = []
+
+    social_instruction = (
+        "Analyze the supplied generated image and create social-media content "
+        "for it.\n\n"
+
+        "Return EXACTLY these four sections:\n\n"
+
+        "[LINKEDIN]\n"
+        "Write a professional LinkedIn post based on the visible image "
+        "and the user's content request. Keep it concise and professional.\n\n"
+
+        "[X / TWITTER]\n"
+        "Write a concise post suitable for X/Twitter. Keep it under 280 "
+        "characters when possible.\n\n"
+
+        "[FACEBOOK]\n"
+        "Write an engaging Facebook post based on the visible image.\n\n"
+
+        "[INSTAGRAM]\n"
+        "Write an engaging Instagram caption with relevant hashtags.\n\n"
+
+        "Do not invent facts that are not visible in the image.\n"
+        "Do not describe objects that cannot reasonably be seen.\n\n"
+
+        f"User's content request: {prompt.strip()}"
+    )
+
     for key_id, pipeline_item in selected_candidates:
         try:
-            descriptions = _build_social_descriptions(_generate_social_text(pipeline_item, image_path, instruction), prompt)
-            needs_revision = len(descriptions) < 4 or any(item["word_count"] < SOCIAL_TARGETS[platform]["minimum"] or item["word_count"] > SOCIAL_TARGETS[platform]["maximum"] or item["character_count"] > SOCIAL_TARGETS[platform]["character_limit"] for platform, item in descriptions.items())
-            if needs_revision:
-                try:
-                    revised = _build_social_descriptions(_generate_social_text(pipeline_item, image_path, instruction + "\n\nREVISION REQUIRED: Regenerate ALL FOUR platforms. Aim at the upper end of every allowed range. Never exceed any maximum. Keep relevant emojis inside the text."), prompt)
-                    if len(revised) == 4: descriptions = revised
-                except Exception as revision_exc:
-                    print("Social description revision failed:", repr(revision_exc))
-            for platform, item in descriptions.items():
-                limit = SOCIAL_TARGETS[platform]["character_limit"]
-                if len(item["text"]) > limit:
-                    clipped = item["text"][:limit]
-                    sentence_end = max(clipped.rfind(". "), clipped.rfind("! "), clipped.rfind("? "))
-                    if sentence_end >= int(limit * 0.70): clipped = clipped[:sentence_end + 1]
-                    item["text"] = clipped.rstrip(); item["character_count"] = len(item["text"]); item["word_count"] = _word_count(item["text"])
-            combined = "\n\n".join(f"[{platform.upper()}]\n{item['text']}" for platform, item in descriptions.items())
-            description_name = f"{Path(safe_name).stem}_description.txt"
-            (IMAGE_OUTPUT_DIR / description_name).write_text(combined, encoding="utf-8")
-            API_KEY_STATE["pipeline_key_id"] = key_id
-            return {"success": True, "filename": safe_name, "content": combined, "description": combined, "descriptions": descriptions, "social_media_filename": description_name, "social_media_file_url": f"/api/social-media/output/{quote(description_name)}", "provider": pipeline_item.get("display_name", "Selected API"), "model": _provider_text_model(pipeline_item), "api_id": key_id, "word_count": _word_count(combined), "message": "Social-media descriptions generated from the actual image with inline relevant icons and length controls."}
-        except Exception as exc:
-            errors.append(f"{pipeline_item.get('display_name', key_id)}: {exc}")
-    raise HTTPException(status_code=502, detail="Unable to generate the social-media description using the selected API keys. " + " | ".join(errors))
+            service = str(
+                pipeline_item.get("service", "other")
+            ).strip().lower()
 
+            key = str(
+                pipeline_item.get("value", "")
+            ).strip()
+
+            if not key:
+                raise RuntimeError(
+                    "The selected API key is empty."
+                )
+
+            # ---------------------------------------------------------
+            # OpenRouter
+            # ---------------------------------------------------------
+            if service == "openrouter":
+
+                text = _openrouter_chat_with_image(
+                    key,
+                    image_path,
+                    social_instruction,
+                    _provider_text_model(pipeline_item),
+                )
+
+            # ---------------------------------------------------------
+            # Gemini
+            # ---------------------------------------------------------
+            elif service == "gemini":
+
+                from google import genai
+                from google.genai import types
+
+                client = genai.Client(
+                    api_key=key
+                )
+
+                response = client.models.generate_content(
+                    model=_provider_text_model(pipeline_item),
+                    contents=[
+                        types.Part.from_text(
+                            text=social_instruction
+                        ),
+                        types.Part.from_bytes(
+                            data=image_path.read_bytes(),
+                            mime_type=get_mime_type(image_path),
+                        ),
+                    ],
+                )
+
+                text = str(
+                    getattr(response, "text", "") or ""
+                ).strip()
+
+                # Defensive extraction for Gemini SDK responses
+                # where response.text is unavailable.
+                if not text:
+
+                    response_candidates = []
+
+                    candidates = getattr(
+                        response,
+                        "candidates",
+                        None,
+                    )
+
+                    if candidates:
+                        for candidate in candidates:
+
+                            candidate_content = getattr(
+                                candidate,
+                                "content",
+                                None,
+                            )
+
+                            parts = getattr(
+                                candidate_content,
+                                "parts",
+                                None,
+                            ) or []
+
+                            for part in parts:
+
+                                part_text = getattr(
+                                    part,
+                                    "text",
+                                    None,
+                                )
+
+                                if part_text:
+                                    response_candidates.append(
+                                        str(part_text)
+                                    )
+
+                    text = "\n".join(
+                        response_candidates
+                    ).strip()
+
+            # ---------------------------------------------------------
+            # Other configured providers
+            # ---------------------------------------------------------
+            else:
+
+                text = _generic_chat_with_image(
+                    pipeline_item,
+                    image_path,
+                    social_instruction,
+                )
+
+            if not text:
+                raise RuntimeError(
+                    "The selected API returned an empty "
+                    "social-media description."
+                )
+
+            # Save the generated description locally.
+            description_name = (
+                f"{Path(safe_name).stem}_description.txt"
+            )
+
+            description_path = (
+                IMAGE_OUTPUT_DIR / description_name
+            )
+
+            description_path.write_text(
+                text,
+                encoding="utf-8",
+            )
+
+            API_KEY_STATE["pipeline_key_id"] = key_id
+
+            return {
+                "success": True,
+                "filename": safe_name,
+                "content": text,
+                "description": text,
+                "social_media_filename": description_name,
+                "social_media_file_url": (
+                    f"/api/social-media/output/"
+                    f"{quote(description_name)}"
+                ),
+                "provider": pipeline_item.get(
+                    "display_name",
+                    "Selected API",
+                ),
+                "model": _provider_text_model(
+                    pipeline_item
+                ),
+                "api_id": key_id,
+                "word_count": len(text.split()),
+                "message": (
+                    "Social-media description generated "
+                    "successfully."
+                ),
+            }
+
+        except Exception as exc:
+
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            "Unable to generate the social-media description "
+            "using the selected API keys. "
+            + " | ".join(errors)
+        ),
+    )
 @app.get("/api/social-media/output/{filename}")
 def get_social_media_file(filename: str):
     path = IMAGE_OUTPUT_DIR / Path(filename).name
@@ -3787,83 +4331,116 @@ async def generate_output_image(
         "changes": {},
     }
 
+@app.post("/api/social-media/generate")
+async def generate_social_media_description(
+    filename: str = Form(...),
+    prompt: str = Form(""),
+    template_json: str = Form("{}"),
+):
+    """
+    Compatibility endpoint used by the existing frontend Generate Description
+    button.
 
-@app.get("/api/canva/connect/oauth/status")
-def canva_oauth_status():
-    return {"configured": _canva_configured(), "authenticated": bool(CANVA_STATE.get("access_token") and time.time() < float(CANVA_STATE.get("expires_at") or 0))}
+    It generates a description from the already-generated image without
+    modifying the existing image-generation pipeline.
+    """
 
-@app.get("/api/canva/connect/oauth/start")
-def canva_oauth_start(filename: str = ""):
-    if not _canva_configured():
-        raise HTTPException(status_code=500, detail="Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET and CANVA_CONNECT_REDIRECT_URI in Railway.")
-    try:
-        return {"authorization_url": _canva_authorization_url(filename)}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-@app.get("/api/canva/connect/oauth/callback")
-def canva_oauth_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
-    if error:
-        message = error_description or error
-        return RedirectResponse(url=f"{_canva_frontend_url()}/image-generator?canva=error&message={quote(message[:500], safe='')}")
-    expected_state = str(CANVA_STATE.get("oauth_state") or "")
-    if not state or not expected_state or not secrets.compare_digest(state, expected_state):
-        raise HTTPException(status_code=400, detail="Invalid Canva OAuth state. Start authorization again.")
-    if not code:
-        raise HTTPException(status_code=400, detail="Canva did not return an authorization code.")
-    verifier = str(CANVA_STATE.get("code_verifier") or "").strip()
-    credentials = base64.b64encode(f"{_canva_client_id()}:{_canva_client_secret()}".encode("utf-8")).decode("ascii")
-    body = urlencode({"grant_type": "authorization_code", "code": code, "code_verifier": verifier, "redirect_uri": _canva_redirect_uri()}).encode("utf-8")
-    request = Request(CANVA_TOKEN_URL, data=body, method="POST", headers={"Authorization": f"Basic {credentials}", "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"})
-    try:
-        with urlopen(request, timeout=60) as response:
-            token_data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        return RedirectResponse(url=f"{_canva_frontend_url()}/image-generator?canva=error&message={quote(('Canva token exchange failed: ' + detail)[:500], safe='')}")
-    access_token = str(token_data.get("access_token") or "").strip()
-    if not access_token:
-        return RedirectResponse(url=f"{_canva_frontend_url()}/image-generator?canva=error&message={quote('Canva token exchange returned no access token.', safe='')}")
-    CANVA_STATE["access_token"] = access_token
-    CANVA_STATE["refresh_token"] = str(token_data.get("refresh_token") or "").strip()
-    CANVA_STATE["expires_at"] = time.time() + float(token_data.get("expires_in", 14400) or 14400)
-    CANVA_STATE["oauth_state"] = ""
-    CANVA_STATE["code_verifier"] = ""
-    pending_filename = Path(str(CANVA_STATE.get("oauth_filename") or "")).name
-    CANVA_STATE["oauth_filename"] = ""
-    if pending_filename:
-        pending_path = IMAGE_OUTPUT_DIR / pending_filename
-        if pending_path.exists() and is_valid_image_file(pending_path):
-            try:
-                created = _create_canva_design_from_image(pending_path, "poster")
-                return RedirectResponse(url=created["edit_url"])
-            except Exception as exc:
-                return RedirectResponse(url=f"{_canva_frontend_url()}/image-generator?canva=error&message={quote(str(exc)[:500], safe='')}")
-    return RedirectResponse(url=f"{_canva_frontend_url()}/image-generator?canva=connected")
-
-@app.post("/api/canva/create-from-generated-image")
-def canva_create_from_generated_image(filename: str = Form(...), design_type: str = Form("poster")):
     safe_name = Path(filename).name
-    if not safe_name:
-        raise HTTPException(status_code=400, detail="Generated image filename is required.")
-    image_path = IMAGE_OUTPUT_DIR / safe_name
-    if not image_path.exists() or not image_path.is_file():
-        raise HTTPException(status_code=404, detail="The generated image was not found on the backend. Generate the image again before opening Canva.")
-    if not is_valid_image_file(image_path):
-        raise HTTPException(status_code=400, detail="The generated output is not a readable image.")
-    if not _canva_configured():
-        raise HTTPException(status_code=500, detail="Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET and CANVA_CONNECT_REDIRECT_URI in Railway.")
-    try:
-        created = _create_canva_design_from_image(image_path, design_type)
-    except RuntimeError as exc:
-        message = str(exc)
-        if "not connected" in message.lower() or "connect canva" in message.lower() or "authorization" in message.lower():
-            raise HTTPException(status_code=401, detail=message) from exc
-        raise HTTPException(status_code=502, detail=message) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Unable to create the Canva design: {exc}") from exc
-    return {"success": True, "design_id": created["design_id"], "edit_url": created["edit_url"], "asset_id": created["asset_id"], "message": "Generated image opened in Canva as one editable image."}
 
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if (
+        not image_path.exists()
+        or not image_path.is_file()
+        or not is_valid_image_file(image_path)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found or is not a valid image.",
+        )
+
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item
+        in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+
+    if not selected_candidates:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Select at least one image-capable API key "
+                "before generating a description."
+            ),
+        )
+
+    errors = []
+
+    for key_id, pipeline_item in selected_candidates:
+        try:
+            description = _pipeline_description(
+                pipeline_item,
+                image_path,
+                prompt.strip(),
+            )
+
+            if description:
+                API_KEY_STATE["pipeline_key_id"] = key_id
+
+                return {
+                    "success": True,
+                    "filename": safe_name,
+                    "description": description,
+                    "content": description,
+                    "provider": pipeline_item.get(
+                        "display_name",
+                        "Selected API",
+                    ),
+                    "model": _provider_text_model(
+                        pipeline_item
+                    ),
+                    "api_id": key_id,
+                    "message": (
+                        "Generated-image description "
+                        "generated successfully."
+                    ),
+                }
+
+        except Exception as exc:
+            errors.append(
+                f"{pipeline_item.get('display_name', key_id)}: {exc}"
+            )
+
+    fallback = (
+        f"Generated image based on the requested content: "
+        f"{prompt.strip()}"
+        if prompt.strip()
+        else
+        "Generated image created successfully "
+        "from the selected reference."
+    )
+
+    return {
+        "success": True,
+        "filename": safe_name,
+        "description": fallback,
+        "content": fallback,
+        "provider": "Generated-image fallback",
+        "model": "",
+        "api_id": "fallback",
+        "warning": " | ".join(errors),
+        "message": (
+            "Generated-image description returned "
+            "using fallback text."
+        ),
+    }
 @app.get("/api/images/output/{filename}")
 def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
