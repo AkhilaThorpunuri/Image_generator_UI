@@ -1,5 +1,3 @@
-App.tsx
-
 import {
   useEffect,
   useRef,
