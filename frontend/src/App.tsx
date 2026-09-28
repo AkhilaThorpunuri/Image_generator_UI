@@ -18,7 +18,10 @@ import type {
 } from "./services/templateService";
 
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://localhost:8000"
+).replace(/\/+$/, "");
 
 
 function resolveApiUrl(url: string): string {
@@ -3476,7 +3479,7 @@ const handleOpenGeneratedImageInCanva = async () => {
 
     if (!status?.configured) {
       throw new Error(
-        "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
+        "Canva is not configured on the backend. The existing Railway variables CANVA_CLIENT_ID and CANVA_CLIENT_SECRET are supported.",
       );
     }
 
