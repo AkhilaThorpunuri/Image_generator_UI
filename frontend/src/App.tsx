@@ -6175,27 +6175,6 @@ const handleOpenGeneratedImageInCanva = async () => {
 
                 )}
 
-                
-<div
-  style={{
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-    marginTop: "16px",
-  }}
->
-  <button
-    type="button"
-    className="secondary-button"
-    onClick={handleOpenGeneratedImageInCanva}
-    disabled={isCreatingCanvaDesign}
-  >
-    {isCreatingCanvaDesign
-      ? "Opening Canva..."
-      : "Open / Edit in Canva"}
-  </button>
-</div>
-
 {canvaMessage && (
   <div
     style={{
