@@ -3104,36 +3104,20 @@ function ImageGenerator({
    */
 
   async function handleGenerateImage() {
-
-    if (selectedInputIds.length === 0 || !reference) {
+    if (selectedInputIds.length === 0 && !reference) {
       setError("Please select at least one reference image.");
       return;
     }
 
-
     if (!templatePrompt.trim()) {
-
-      setError(
-        "Enter a content prompt before generating the output image.",
-      );
-
+      setError("Enter a content prompt before generating the output image.");
       return;
     }
 
-
-    if (
-      reference.type === "pdf" ||
-      reference.type === "video" ||
-      reference.type === "youtube"
-    ) {
-
-      setError(
-        "Image generation currently requires an image reference.",
-      );
-
+    if (reference && (reference.type === "pdf" || reference.type === "video" || reference.type === "youtube")) {
+      setError("Image generation currently requires image references.");
       return;
     }
-
 
     setError("");
     setPromptMode("manual");
@@ -3147,13 +3131,7 @@ function ImageGenerator({
     setGeneratedTextChanges({});
     setIsGeneratingImage(true);
 
-
     try {
-
-      // The FastAPI backend keeps API credentials in process memory. The
-      // browser can retain selected API IDs after a backend restart, so never
-      // rely only on the background restore effect. Synchronize the current
-      // selection immediately before image generation.
       if (selectedApiKeys.length === 0) {
         throw new Error(
           "No API key is selected. Select at least one API key before generating an image.",
@@ -3166,21 +3144,17 @@ function ImageGenerator({
       );
       const apiStatus = await apiStatusResponse.json().catch(() => null);
 
-      if (!apiStatusResponse.ok) {
+      if (!apiStatusResponse.ok || !apiStatus?.configured) {
         throw new Error(
           String(
             apiStatus?.detail ||
-              "Unable to verify the selected API keys.",
+              "The API key configuration is no longer available. Please return to API Setup and upload the API key file again.",
           ),
         );
       }
 
-      if (!apiStatus?.configured) {
-        throw new Error(
-          "The API key configuration is no longer available on the backend. Please return to API Setup, upload the API key file again, and select the required API key(s).",
-        );
-      }
-
+      // The current UI selection is always authoritative. Do not use a cached
+      // pipeline key from a previous generation.
       const selectionResponse = await fetch(
         `${API_BASE_URL}/api/api-keys/select`,
         {
@@ -3191,233 +3165,144 @@ function ImageGenerator({
         },
       );
       const selectionData = await selectionResponse.json().catch(() => null);
-
       if (!selectionResponse.ok) {
         throw new Error(
-          String(
-            selectionData?.detail ||
-              "Unable to synchronize the selected API keys.",
-          ),
+          String(selectionData?.detail || "Unable to synchronize the selected API keys."),
         );
       }
 
       const selectedNames = Array.isArray(selectionData?.selected)
         ? selectionData.selected
         : [];
-
       if (selectedNames.length === 0) {
         throw new Error(
-          "None of the selected API keys are available on the backend. Please return to API Setup and upload the API key file again.",
+          "None of the selected API keys are available on the backend.",
         );
       }
 
-
-      const sourceType =
-        reference.source ===
-        "google-drive"
-          ? "google-drive"
-          : reference.source ===
-              "upload"
-            ? "upload"
-            : reference.source ===
-                "input-folder"
-              ? "input-folder"
-              : "external-url";
-
-
-      const source =
-        reference.sourceId ||
-        reference.url;
-
-
-      if (
-        source.startsWith("blob:")
-      ) {
-
-        throw new Error(
-          "The selected uploaded reference is not available to the backend.",
-        );
-      }
-
-
-      if (!source) {
-
-        throw new Error(
-          "Reference source is missing.",
-        );
-      }
-
-
-      const formData =
-        new FormData();
-
-
-      formData.append(
-        "source_type",
-        sourceType,
-      );
-
-      formData.append(
-        "source",
-        source,
-      );
-
-      formData.append(
-        "filename",
-        reference.name,
-      );
-
-      formData.append(
-        "content_type",
-        reference.mimeType || "",
-      );
-
+      // Build the reference list from the actual selected reference IDs.
+      // External URL/manual reference remains supported when no Drive/input
+      // item is selected. Google Drive IDs are sent as IDs, never preview URLs.
       const selectedReferences = selectedInputIds
         .map((id) => {
           const file = inputFiles.find((item) => item.id === id);
           if (!file) return null;
-          return {
-            number: getDriveReferenceNumber(file) ?? (selectedInputIds.indexOf(id) + 1),
-            source_type: file.source === "google-drive"
+
+          const sourceType =
+            file.source === "google-drive"
               ? "google-drive"
               : file.source === "manual-upload"
                 ? "upload"
-                : "input-folder",
-            source: file.source === "google-drive"
-              ? file.id.replace(/^drive:/, "")
-              : file.name,
+                : "input-folder";
+
+          return {
+            number:
+              getDriveReferenceNumber(file) ??
+              selectedInputIds.indexOf(id) + 1,
+            source_type: sourceType,
+            source:
+              file.source === "google-drive"
+                ? file.id.replace(/^drive:/i, "")
+                : file.name,
             filename: file.name,
             content_type: file.mimeType || "",
           };
         })
         .filter(Boolean);
 
-      formData.append(
-        "references_json",
-        JSON.stringify(selectedReferences),
-      );
+      if (selectedReferences.length === 0 && reference) {
+        const sourceType =
+          reference.source === "google-drive"
+            ? "google-drive"
+            : reference.source === "upload"
+              ? "upload"
+              : reference.source === "input-folder"
+                ? "input-folder"
+                : "external-url";
 
-      formData.append(
-        "prompt",
-        templatePrompt.trim(),
-      );
+        const source = reference.sourceId || reference.url;
+        if (!source || source.startsWith("blob:")) {
+          throw new Error(
+            "The selected reference is not available to the backend.",
+          );
+        }
 
-      // Template generation is disabled for now. The backend accepts an
-      // empty template context and uses the reference image + manual prompt.
-      formData.append(
-        "template_json",
-        "{}",
-      );
+        selectedReferences.push({
+          number: 1,
+          source_type: sourceType,
+          source,
+          filename: reference.name || "reference.png",
+          content_type: reference.mimeType || "",
+        });
+      }
 
+      if (selectedReferences.length === 0) {
+        throw new Error("At least one reference image is required.");
+      }
 
-      const response =
-        await fetch(
-          `${API_BASE_URL}/api/images/generate`,
-          {
-            method:
-              "POST",
-            body:
-              formData,
+      if (selectedReferences.length > 16) {
+        throw new Error("A maximum of 16 reference images can be selected.");
+      }
+
+      const firstReference = selectedReferences[0];
+      const formData = new FormData();
+      formData.append("source_type", firstReference.source_type);
+      formData.append("source", firstReference.source);
+      formData.append("filename", firstReference.filename);
+      formData.append("content_type", firstReference.content_type);
+      formData.append("references_json", JSON.stringify(selectedReferences));
+      formData.append("prompt", templatePrompt.trim());
+      formData.append("template_json", "{}");
+
+      const response = await fetch(
+        `${API_BASE_URL}/api/images/generate`,
+        {
+          method: "POST",
+          body: formData,
           credentials: "include",
-          },
-        );
+        },
+      );
 
-
-      const data =
-        await response
-          .json()
-          .catch(() => null);
-
+      const data = await response.json().catch(() => null);
 
       if (!response.ok) {
-
         throw new Error(
-          String(
-            data?.detail ||
-              "Unable to generate the output image.",
-          ),
+          String(data?.detail || "Unable to generate the output image."),
         );
       }
-
 
       if (!data?.image_url) {
-
-        throw new Error(
-          "Image generation completed without an output image.",
-        );
+        throw new Error("Image generation completed without an output image.");
       }
 
-
-      setGeneratedImageUrl(
-        resolveApiUrl(
-          data.image_url,
-        ),
-      );
-
-      setGeneratedImageFilename(
-        String(
-          data.filename ||
-            "",
-        ),
-      );
-
-      const returnedDescription =
-        typeof data?.description === "string"
-          ? data.description.trim()
-          : "";
-
+      setGeneratedImageUrl(resolveApiUrl(data.image_url));
+      setGeneratedImageFilename(String(data.filename || ""));
       setGeneratedImageDescription(
-        returnedDescription ||
-          (templatePrompt.trim()
-            ? `Generated image based on the selected reference and prompt: ${templatePrompt.trim()}`
-            : "Generated image based on the selected reference image."),
+        typeof data?.description === "string" && data.description.trim()
+          ? data.description.trim()
+          : `Generated image based on the selected ${selectedReferences.length} reference image${selectedReferences.length === 1 ? "" : "s"} and prompt: ${templatePrompt.trim()}`,
       );
-
-      setGeneratedImageModel(
-        String(
-          data.model ||
-            "",
-        ),
-      );
-      setGeneratedImageProvider(
-        String(
-          data.provider ||
-            "",
-        ),
-      );
+      setGeneratedImageModel(String(data.model || ""));
+      setGeneratedImageProvider(String(data.provider || ""));
       setGeneratedImageSaved(false);
       setGeneratedImageSaveMessage("");
-
       setCanvaEditUrl("");
       setCanvaDesignId("");
       setCanvaMessage("");
-
       setGeneratedTextChanges(
-        data?.changes &&
-        typeof data.changes === "object"
+        data?.changes && typeof data.changes === "object"
           ? data.changes
           : {},
       );
-
     } catch (err) {
-
-      console.error(
-        "Image generation failed:",
-        err,
-      );
-
-
+      console.error("Image generation failed:", err);
       setError(
         err instanceof Error
           ? err.message
           : "Unable to generate the output image.",
       );
-
     } finally {
-
-      setIsGeneratingImage(
-        false,
-      );
+      setIsGeneratingImage(false);
     }
   }
 
