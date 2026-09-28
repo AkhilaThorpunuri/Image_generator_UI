@@ -3525,15 +3525,112 @@ function ImageGenerator({
 
 
 const handleOpenGeneratedImageInCanva = async () => {
-  if (!generatedImageFilename || isCreatingCanvaDesign) return;
+  if (!generatedImageFilename || isCreatingCanvaDesign) {
+    return;
+  }
 
   setIsCreatingCanvaDesign(true);
   setCanvaMessage("");
 
+  // Open immediately to avoid popup blockers after async requests.
+  const canvaWindow = window.open(
+    "about:blank",
+    "_blank",
+  );
+
   try {
+    // ---------------------------------------------------------
+    // 1. Check Canva connection
+    // ---------------------------------------------------------
+
+    const statusResponse = await fetch(
+      `${API_BASE_URL}/api/canva/connect/oauth/status`,
+      {
+        credentials: "include",
+      },
+    );
+
+    const status = await statusResponse
+      .json()
+      .catch(() => null);
+
+    if (!statusResponse.ok) {
+      throw new Error(
+        String(
+          status?.detail ||
+            "Unable to check Canva connection.",
+        ),
+      );
+    }
+
+    // ---------------------------------------------------------
+    // 2. Start OAuth when Canva is not connected
+    // ---------------------------------------------------------
+
+    if (!status?.configured) {
+      throw new Error(
+        "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
+      );
+    }
+
+    if (!status?.authenticated) {
+      const authResponse = await fetch(
+        `${API_BASE_URL}/api/canva/connect/oauth/start`,
+        {
+          credentials: "include",
+        },
+      );
+
+      const authData = await authResponse
+        .json()
+        .catch(() => null);
+
+      if (
+        !authResponse.ok ||
+        !authData?.authorization_url
+      ) {
+        throw new Error(
+          String(
+            authData?.detail ||
+              "Unable to start Canva authorization.",
+          ),
+        );
+      }
+
+      if (canvaWindow) {
+        canvaWindow.location.href = String(
+          authData.authorization_url,
+        );
+      } else {
+        window.open(
+          String(authData.authorization_url),
+          "_blank",
+          "noopener,noreferrer",
+        );
+      }
+
+      setCanvaMessage(
+        "Canva authorization opened in a new tab. Approve access, return here, and click Open / Edit in Canva again.",
+      );
+
+      return;
+    }
+
+    // ---------------------------------------------------------
+    // 3. Create editable Canva design from generated image
+    // ---------------------------------------------------------
+
     const formData = new FormData();
-    formData.append("filename", generatedImageFilename);
-    formData.append("design_type", "poster");
+
+    formData.append(
+      "filename",
+      generatedImageFilename,
+    );
+
+    formData.append(
+      "design_type",
+      "poster",
+    );
 
     const response = await fetch(
       `${API_BASE_URL}/api/canva/create-from-generated-image`,
@@ -3544,7 +3641,9 @@ const handleOpenGeneratedImageInCanva = async () => {
       },
     );
 
-    const data = await response.json().catch(() => null);
+    const data = await response
+      .json()
+      .catch(() => null);
 
     if (!response.ok) {
       throw new Error(
@@ -3555,32 +3654,81 @@ const handleOpenGeneratedImageInCanva = async () => {
       );
     }
 
-    if (!data?.edit_url) {
+    if (
+      !data?.edit_url ||
+      !data?.design_id
+    ) {
       throw new Error(
-        "Canva created the design but did not return an edit URL.",
+        "Canva did not return the design ID and edit URL.",
       );
     }
 
-    setCanvaEditUrl(String(data.edit_url));
-    setCanvaDesignId(String(data.design_id || ""));
-    setCanvaMessage("Editable Canva design created successfully.");
+    // ---------------------------------------------------------
+    // 4. Store returned Canva information
+    // ---------------------------------------------------------
 
-    window.open(
+    setCanvaEditUrl(
       String(data.edit_url),
-      "_blank",
-      "noopener,noreferrer",
     );
+
+    setCanvaDesignId(
+      String(data.design_id),
+    );
+
+    setCanvaMessage(
+      String(
+        data.message ||
+          "Editable Canva design created successfully.",
+      ),
+    );
+
+    // ---------------------------------------------------------
+    // 5. Open Canva editor
+    // ---------------------------------------------------------
+
+    if (canvaWindow) {
+      canvaWindow.location.href = String(
+        data.edit_url,
+      );
+    } else {
+      window.open(
+        String(data.edit_url),
+        "_blank",
+        "noopener,noreferrer",
+      );
+    }
+
   } catch (error) {
-    console.error("Canva design creation failed:", error);
+
+    if (
+      canvaWindow &&
+      !canvaWindow.closed
+    ) {
+      try {
+        canvaWindow.close();
+      } catch {
+        // Ignore popup cleanup errors.
+      }
+    }
+
+    console.error(
+      "Canva design creation failed:",
+      error,
+    );
+
     setCanvaEditUrl("");
     setCanvaDesignId("");
+
     setCanvaMessage(
       error instanceof Error
         ? error.message
         : "Unable to create the editable Canva design.",
     );
+
   } finally {
+
     setIsCreatingCanvaDesign(false);
+
   }
 };
 
@@ -5917,6 +6065,70 @@ const handleOpenGeneratedImageInCanva = async () => {
                 />
 
               </div>
+              <div
+  style={{
+    display: "flex",
+    gap: "10px",
+    flexWrap: "wrap",
+    marginTop: "16px",
+  }}
+>
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={handleOpenGeneratedImageInCanva}
+    disabled={isCreatingCanvaDesign}
+  >
+    {isCreatingCanvaDesign
+      ? "Opening Canva..."
+      : "Open / Edit in Canva"}
+  </button>
+</div>
+
+{canvaMessage && (
+  <div
+    style={{
+      marginTop: "10px",
+      padding: "10px 12px",
+      borderRadius: "10px",
+      border:
+        "1px solid rgba(120, 100, 255, 0.25)",
+      background:
+        "rgba(120, 100, 255, 0.07)",
+    }}
+  >
+    <p style={{ margin: 0 }}>
+      {canvaMessage}
+    </p>
+
+    {canvaEditUrl && (
+      <a
+        href={canvaEditUrl}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          display: "inline-block",
+          marginTop: "7px",
+          fontWeight: 700,
+        }}
+      >
+        Reopen editable Canva design
+      </a>
+    )}
+
+    {canvaDesignId && (
+      <small
+        style={{
+          display: "block",
+          marginTop: "5px",
+          opacity: 0.65,
+        }}
+      >
+        Canva design: {canvaDesignId}
+      </small>
+    )}
+  </div>
+)}
 
 
               <div className="generated-output-details">
