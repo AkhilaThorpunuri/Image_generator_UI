@@ -1,3 +1,4 @@
+
 import {
   useEffect,
   useRef,
@@ -18,10 +19,7 @@ import type {
 } from "./services/templateService";
 
 
-const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL ||
-  "http://localhost:8000"
-).replace(/\/+$/, "");
+const API_BASE_URL = "http://localhost:8000";
 
 
 function resolveApiUrl(url: string): string {
@@ -1457,55 +1455,6 @@ function getApiServiceIcon(
   );
 }
 
-function inferSocialIcon(text: string, tags: string[] = []): string {
-  const value = `${text} ${tags.join(" ")}`.toLowerCase();
-
-  if (/\b(ai|artificial intelligence|machine learning|robot|automation|tech|technology|software|coding|developer|digital|cyber|data)\b/.test(value)) {
-    return "🤖";
-  }
-  if (/\b(food|recipe|restaurant|cooking|chef|meal|pizza|burger|dessert|coffee|drink|cuisine)\b/.test(value)) {
-    return "🍽️";
-  }
-  if (/\b(travel|tourism|vacation|destination|beach|mountain|hotel|flight|adventure)\b/.test(value)) {
-    return "✈️";
-  }
-  if (/\b(fitness|gym|workout|exercise|health|running|yoga|sport|athlete)\b/.test(value)) {
-    return "💪";
-  }
-  if (/\b(nature|forest|tree|flower|garden|landscape|wildlife|ocean|sunset|sunrise)\b/.test(value)) {
-    return "🌿";
-  }
-  if (/\b(fashion|clothing|style|dress|beauty|makeup|jewelry|outfit)\b/.test(value)) {
-    return "✨";
-  }
-  if (/\b(business|startup|finance|marketing|sales|career|leadership|office|professional)\b/.test(value)) {
-    return "💡";
-  }
-  if (/\b(education|learning|course|student|school|college|study|training)\b/.test(value)) {
-    return "📚";
-  }
-  if (/\b(product|ecommerce|shopping|store|brand|retail)\b/.test(value)) {
-    return "🛍️";
-  }
-  if (/\b(art|creative|design|illustration|photography|visual)\b/.test(value)) {
-    return "🎨";
-  }
-
-  return "✨";
-}
-
-function ensureSocialContentIcon(text: string, icon: string): string {
-  const trimmed = text.trim();
-  if (!trimmed) return icon;
-
-  // Keep an emoji already supplied by the vision model.
-  if (/[\u{1F300}-\u{1FAFF}]/u.test(trimmed)) {
-    return trimmed;
-  }
-
-  return `${icon} ${trimmed}`;
-}
-
 function ImageGenerator({
   selectedApiKeys,
   selectedApiServices,
@@ -1578,12 +1527,6 @@ function ImageGenerator({
     text: string;
     character_count: number;
     character_limit: number;
-    word_count?: number;
-    target_word_count?: number;
-    minimum_word_count?: number;
-    maximum_word_count?: number;
-    icon?: string;
-    tags?: string[];
   };
 
   const [socialDescriptions, setSocialDescriptions] =
@@ -3494,14 +3437,7 @@ function ImageGenerator({
 
 
 const handleOpenGeneratedImageInCanva = async () => {
-  if (isCreatingCanvaDesign) return;
-
-  if (!generatedImageFilename.trim()) {
-    setCanvaMessage(
-      "The generated image filename is not available. Please generate the image again before opening Canva.",
-    );
-    return;
-  }
+  if (!generatedImageFilename || isCreatingCanvaDesign) return;
 
   setIsCreatingCanvaDesign(true);
   setCanvaMessage("");
@@ -3528,21 +3464,13 @@ const handleOpenGeneratedImageInCanva = async () => {
 
     if (!status?.configured) {
       throw new Error(
-        "Canva is not configured on the backend. The existing Railway variables CANVA_CLIENT_ID and CANVA_CLIENT_SECRET are supported.",
+        "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
       );
     }
 
     if (!status?.authenticated) {
-      const oauthStartUrl = new URL(
-        `${API_BASE_URL}/api/canva/connect/oauth/start`,
-      );
-      oauthStartUrl.searchParams.set(
-        "filename",
-        generatedImageFilename,
-      );
-
       const authResponse = await fetch(
-        oauthStartUrl.toString(),
+        `${API_BASE_URL}/api/canva/connect/oauth/start`,
         { credentials: "include" },
       );
       const authData = await authResponse.json().catch(() => null);
@@ -3569,7 +3497,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened. After you approve access, Canva will create the editable design from this generated image automatically.",
+        "Canva authorization opened in a new tab. Approve access, return here, and click Open / Edit in Canva again.",
       );
       return;
     }
@@ -3617,7 +3545,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     setCanvaMessage(
       String(
         data.message ||
-          "Generated image opened in Canva as one editable image.",
+          "Editable Canva design created successfully.",
       ),
     );
 
@@ -3702,49 +3630,21 @@ const handleOpenGeneratedImageInCanva = async () => {
         data?.descriptions &&
         typeof data.descriptions === "object"
       ) {
-        const platformDefaults: Record<string, { icon: string; tags: string[] }> = {
-          "LinkedIn": { icon: "✨", tags: [] },
-          "X / Twitter": { icon: "✨", tags: [] },
-          "Facebook": { icon: "✨", tags: [] },
-          "Instagram": { icon: "✨", tags: [] },
-        };
-        const normalizedDescriptions: Record<string, SocialDescriptionItem> = {};
-        Object.entries(data.descriptions as Record<string, any>).forEach(([platform, value]) => {
-          const fallback = platformDefaults[platform] || { icon: "✨", tags: [] };
-          const item = value && typeof value === "object" ? value : {};
-          const rawContent = String(item.text || item.content || "").trim();
-          const rawTags = Array.isArray(item.tags)
-            ? item.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
-            : [];
-          const suppliedIcon = String(item.icon || "").trim();
-          const safeIcon =
-            suppliedIcon && !["💼", "𝕏", "f", "◎", "C"].includes(suppliedIcon)
-              ? suppliedIcon
-              : inferSocialIcon(rawContent, rawTags);
-          const content = ensureSocialContentIcon(rawContent, safeIcon);
-          const safeTags = rawTags.length > 0 ? rawTags : fallback.tags;
-          normalizedDescriptions[platform] = {
-            text: content,
-            character_count: Number(item.character_count || content.length),
-            character_limit: Number(item.character_limit || 0),
-            word_count: Number(item.word_count || content.split(/\s+/).filter(Boolean).length),
-            target_word_count: Number(item.target_word_count || 0) || undefined,
-            minimum_word_count: Number(item.minimum_word_count || 0) || undefined,
-            maximum_word_count: Number(item.maximum_word_count || 0) || undefined,
-            icon: safeIcon,
-            tags: safeTags,
-          };
-        });
-        setSocialDescriptions(normalizedDescriptions);
+        setSocialDescriptions(
+          data.descriptions as Record<
+            string,
+            SocialDescriptionItem
+          >,
+        );
       } else {
         const rawContent =
           String(data?.content || "").trim();
 
-        const limits: Record<string, { character: number; target: number; minimum: number; maximum: number }> = {
-          "[LINKEDIN]": { character: 3000, target: 180, minimum: 165, maximum: 195 },
-          "[X / TWITTER]": { character: 280, target: 35, minimum: 30, maximum: 40 },
-          "[FACEBOOK]": { character: 10000, target: 160, minimum: 145, maximum: 175 },
-          "[INSTAGRAM]": { character: 2200, target: 150, minimum: 135, maximum: 165 },
+        const limits: Record<string, number> = {
+          "[LINKEDIN]": 3000,
+          "[X / TWITTER]": 280,
+          "[FACEBOOK]": 10000,
+          "[INSTAGRAM]": 2200,
         };
 
         const headings = Object.keys(limits);
@@ -3811,24 +3711,12 @@ const handleOpenGeneratedImageInCanva = async () => {
               );
 
           if (content) {
-            const legacyTags = (content.match(/#[A-Za-z0-9_]+/g) || [])
-              .map((tag) => tag.trim())
-              .filter(Boolean);
-            const legacyIcon = inferSocialIcon(content, legacyTags);
             parsed[platform] = {
-              text: ensureSocialContentIcon(content, legacyIcon),
+              text: content,
               character_count:
-                ensureSocialContentIcon(content, legacyIcon).length,
+                content.length,
               character_limit:
-                limits[heading].character,
-              word_count:
-                content.split(/\s+/).filter(Boolean).length,
-              target_word_count:
-                limits[heading].target,
-              minimum_word_count:
-                limits[heading].minimum,
-              maximum_word_count:
-                limits[heading].maximum,
+                limits[heading],
             };
           }
         });
@@ -6141,43 +6029,19 @@ const handleOpenGeneratedImageInCanva = async () => {
     display: "flex",
     gap: "10px",
     flexWrap: "wrap",
-    alignItems: "center",
     marginTop: "16px",
-    paddingTop: "14px",
-    borderTop: "1px solid rgba(255,255,255,0.08)",
   }}
 >
   <button
     type="button"
+    className="secondary-button"
     onClick={handleOpenGeneratedImageInCanva}
     disabled={isCreatingCanvaDesign}
-    aria-label="Edit generated image in Canva"
-    style={{
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: "8px",
-      minHeight: "42px",
-      padding: "10px 18px",
-      borderRadius: "10px",
-      border: "1px solid rgba(123, 92, 255, 0.45)",
-      background: isCreatingCanvaDesign
-        ? "rgba(123, 92, 255, 0.25)"
-        : "linear-gradient(135deg, #7b4dff, #4f8cff)",
-      color: "#fff",
-      fontWeight: 800,
-      fontSize: "13px",
-      cursor: isCreatingCanvaDesign ? "wait" : "pointer",
-      boxShadow: "0 8px 24px rgba(79, 76, 255, 0.22)",
-      opacity: isCreatingCanvaDesign ? 0.7 : 1,
-    }}
   >
-    <span aria-hidden="true" style={{ fontSize: "17px", lineHeight: 1 }}>🎨</span>
-    {isCreatingCanvaDesign ? "Opening Canva..." : "Edit in Canva"}
+    {isCreatingCanvaDesign
+      ? "Opening Canva..."
+      : "Open / Edit in Canva"}
   </button>
-  <span style={{ fontSize: "11px", opacity: 0.62 }}>
-    Opens the generated image as one editable image in Canva.
-  </span>
 </div>
 
 {canvaMessage && (
@@ -6366,16 +6230,10 @@ const handleOpenGeneratedImageInCanva = async () => {
               fontSize: "11px",
             }}
           >
-            <strong style={{ display: "inline-flex", alignItems: "center", gap: "7px" }}>
-              <span aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px", borderRadius: "7px", background: "rgba(120,100,255,0.14)", border: "1px solid rgba(120,100,255,0.22)" }}>
-                {item.icon || "✦"}
-              </span>
-              {platform}
-            </strong>
-            <span style={{ opacity: 0.65, textAlign: "right" }}>
-              {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
-              {item.target_word_count ? ` / ~${item.target_word_count}` : ""}
-              {" · "}{item.character_count} / {item.character_limit} chars
+            <strong>{platform}</strong>
+            <span style={{ opacity: 0.65 }}>
+              {item.character_count} /{" "}
+              {item.character_limit}
             </span>
           </div>
 
@@ -6389,18 +6247,6 @@ const handleOpenGeneratedImageInCanva = async () => {
           >
             {item.text}
           </p>
-          {item.tags && item.tags.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", marginTop: "8px" }}>
-              {item.tags.map((tag) => (
-                <span
-                  key={`${platform}-${tag}`}
-                  style={{ padding: "3px 7px", borderRadius: "999px", fontSize: "10px", background: "rgba(120,100,255,0.10)", border: "1px solid rgba(120,100,255,0.20)" }}
-                >
-                  {tag.startsWith("#") ? tag : `#${tag}`}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       ))}
     </div>
@@ -6721,21 +6567,15 @@ const handleOpenGeneratedImageInCanva = async () => {
                       gap: "8px",
                     }}
                   >
-                    <strong style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
-                      <span aria-hidden="true" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: "28px", height: "28px", borderRadius: "8px", background: "rgba(120,100,255,0.14)", border: "1px solid rgba(120,100,255,0.22)" }}>
-                        {item.icon || "✦"}
-                      </span>
-                      {platform}
-                    </strong>
+                    <strong>{platform}</strong>
                     <span
                       style={{
                         opacity: 0.65,
                         fontSize: "12px",
                       }}
                     >
-                      {item.word_count ?? item.text.split(/\s+/).filter(Boolean).length} words
-                      {item.target_word_count ? ` / ~${item.target_word_count}` : ""}
-                      {" · "}{item.character_count} / {item.character_limit} chars
+                      {item.character_count} /{" "}
+                      {item.character_limit}
                     </span>
                   </div>
 
@@ -6748,18 +6588,6 @@ const handleOpenGeneratedImageInCanva = async () => {
                   >
                     {item.text}
                   </p>
-                  {item.tags && item.tags.length > 0 && (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "10px" }}>
-                      {item.tags.map((tag) => (
-                        <span
-                          key={`${platform}-preview-${tag}`}
-                          style={{ padding: "4px 8px", borderRadius: "999px", fontSize: "11px", background: "rgba(120,100,255,0.10)", border: "1px solid rgba(120,100,255,0.20)" }}
-                        >
-                          {tag.startsWith("#") ? tag : `#${tag}`}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </article>
               ))}
             </div>
