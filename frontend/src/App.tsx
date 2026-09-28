@@ -18,9 +18,7 @@ import type {
 } from "./services/templateService";
 
 
-const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL ||
-    "http://localhost:8000").replace(/\/+$/, "");
+const API_BASE_URL = "http://localhost:8000";
 
 
 function resolveApiUrl(url: string): string {
@@ -2477,7 +2475,9 @@ function ImageGenerator({
 
   async function handleUploadedFile(
     file: File,
-  ) {
+    appendToSelection = false,
+    currentSelectedIds: string[] = [],
+  ): Promise<string | null> {
 
     const extension =
       file.name.includes(".")
@@ -2553,9 +2553,11 @@ function ImageGenerator({
         }
 
 
-        setSelectedInputIds([
-          data.id,
-        ]);
+        const nextSelectedIds = appendToSelection
+          ? [...currentSelectedIds, data.id]
+          : [data.id];
+
+        setSelectedInputIds(nextSelectedIds);
 
 
         setTemplateResult(
@@ -2597,9 +2599,13 @@ function ImageGenerator({
         };
 
 
-        setReference(
-          uploadedReference,
-        );
+        // Keep the first uploaded image as the primary preview/reference,
+        // while all uploaded images remain selected for multi-reference generation.
+        if (!appendToSelection || currentSelectedIds.length === 0) {
+          setReference(
+            uploadedReference,
+          );
+        }
 
 
         // Template generation is temporarily disabled.
@@ -2616,6 +2622,8 @@ function ImageGenerator({
           false,
         );
 
+        return String(data.id);
+
       } catch (err) {
 
         console.error(
@@ -2630,6 +2638,8 @@ function ImageGenerator({
             : "Unable to upload and tag image.",
         );
 
+        return null;
+
       } finally {
 
         setIsTaggingImages(
@@ -2638,7 +2648,6 @@ function ImageGenerator({
       }
 
 
-      return;
     }
 
 
@@ -2689,27 +2698,42 @@ function ImageGenerator({
     setShowUrlInput(
       false,
     );
+
+    return null;
   }
 
 
-  function handleFileInputChange(
+  async function handleFileInputChange(
     event: ChangeEvent<HTMLInputElement>,
   ) {
+    const files = Array.from(event.target.files || []) as File[];
 
-    const file =
-      event.target.files?.[0];
-
-
-    if (file) {
-
-      void handleUploadedFile(
-        file,
-      );
+    if (files.length === 0) {
+      event.target.value = "";
+      return;
     }
 
+    try {
+      // Upload every selected image and keep all successful uploads selected.
+      // This preserves the existing single-upload flow while allowing the user
+      // to choose multiple reference images in one action.
+      let selectedIds = [...selectedInputIds];
 
-    event.target.value =
-      "";
+      for (const file of files) {
+        const uploadedId = await handleUploadedFile(
+          file,
+          selectedIds.length > 0,
+          selectedIds,
+        );
+
+        if (uploadedId && !selectedIds.includes(uploadedId)) {
+          selectedIds = [...selectedIds, uploadedId];
+          setSelectedInputIds(selectedIds);
+        }
+      }
+    } finally {
+      event.target.value = "";
+    }
   }
 
 
@@ -3527,34 +3551,21 @@ function ImageGenerator({
 
 
 const handleOpenGeneratedImageInCanva = async () => {
-  if (!generatedImageFilename || isCreatingCanvaDesign) {
-    return;
-  }
+  if (!generatedImageFilename || isCreatingCanvaDesign) return;
 
   setIsCreatingCanvaDesign(true);
   setCanvaMessage("");
 
-  // Open immediately to avoid popup blockers after async requests.
-  const canvaWindow = window.open(
-    "about:blank",
-    "_blank",
-  );
+  // Open the tab immediately from the click event so browser popup blockers
+  // do not reject the later Canva navigation after asynchronous API calls.
+  const canvaWindow = window.open("about:blank", "_blank");
 
   try {
-    // ---------------------------------------------------------
-    // 1. Check Canva connection
-    // ---------------------------------------------------------
-
     const statusResponse = await fetch(
       `${API_BASE_URL}/api/canva/connect/oauth/status`,
-      {
-        credentials: "include",
-      },
+      { credentials: "include" },
     );
-
-    const status = await statusResponse
-      .json()
-      .catch(() => null);
+    const status = await statusResponse.json().catch(() => null);
 
     if (!statusResponse.ok) {
       throw new Error(
@@ -3565,10 +3576,6 @@ const handleOpenGeneratedImageInCanva = async () => {
       );
     }
 
-    // ---------------------------------------------------------
-    // 2. Start OAuth when Canva is not connected
-    // ---------------------------------------------------------
-
     if (!status?.configured) {
       throw new Error(
         "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
@@ -3578,19 +3585,11 @@ const handleOpenGeneratedImageInCanva = async () => {
     if (!status?.authenticated) {
       const authResponse = await fetch(
         `${API_BASE_URL}/api/canva/connect/oauth/start`,
-        {
-          credentials: "include",
-        },
+        { credentials: "include" },
       );
+      const authData = await authResponse.json().catch(() => null);
 
-      const authData = await authResponse
-        .json()
-        .catch(() => null);
-
-      if (
-        !authResponse.ok ||
-        !authData?.authorization_url
-      ) {
+      if (!authResponse.ok || !authData?.authorization_url) {
         throw new Error(
           String(
             authData?.detail ||
@@ -3614,21 +3613,14 @@ const handleOpenGeneratedImageInCanva = async () => {
       setCanvaMessage(
         "Canva authorization opened in a new tab. Approve access, return here, and click Open / Edit in Canva again.",
       );
-
       return;
     }
 
-    // ---------------------------------------------------------
-    // 3. Create editable Canva design from generated image
-    // ---------------------------------------------------------
-
     const formData = new FormData();
-
     formData.append(
       "filename",
       generatedImageFilename,
     );
-
     formData.append(
       "design_type",
       "poster",
@@ -3656,27 +3648,14 @@ const handleOpenGeneratedImageInCanva = async () => {
       );
     }
 
-    if (
-      !data?.edit_url ||
-      !data?.design_id
-    ) {
+    if (!data?.edit_url || !data?.design_id) {
       throw new Error(
         "Canva did not return the design ID and edit URL.",
       );
     }
 
-    // ---------------------------------------------------------
-    // 4. Store returned Canva information
-    // ---------------------------------------------------------
-
-    setCanvaEditUrl(
-      String(data.edit_url),
-    );
-
-    setCanvaDesignId(
-      String(data.design_id),
-    );
-
+    setCanvaEditUrl(String(data.edit_url));
+    setCanvaDesignId(String(data.design_id));
     setCanvaMessage(
       String(
         data.message ||
@@ -3684,14 +3663,8 @@ const handleOpenGeneratedImageInCanva = async () => {
       ),
     );
 
-    // ---------------------------------------------------------
-    // 5. Open Canva editor
-    // ---------------------------------------------------------
-
     if (canvaWindow) {
-      canvaWindow.location.href = String(
-        data.edit_url,
-      );
+      canvaWindow.location.href = String(data.edit_url);
     } else {
       window.open(
         String(data.edit_url),
@@ -3699,13 +3672,8 @@ const handleOpenGeneratedImageInCanva = async () => {
         "noopener,noreferrer",
       );
     }
-
   } catch (error) {
-
-    if (
-      canvaWindow &&
-      !canvaWindow.closed
-    ) {
+    if (canvaWindow && !canvaWindow.closed) {
       try {
         canvaWindow.close();
       } catch {
@@ -3717,20 +3685,15 @@ const handleOpenGeneratedImageInCanva = async () => {
       "Canva design creation failed:",
       error,
     );
-
     setCanvaEditUrl("");
     setCanvaDesignId("");
-
     setCanvaMessage(
       error instanceof Error
         ? error.message
         : "Unable to create the editable Canva design.",
     );
-
   } finally {
-
     setIsCreatingCanvaDesign(false);
-
   }
 };
 
@@ -6069,7 +6032,6 @@ const handleOpenGeneratedImageInCanva = async () => {
               </div>
 
 
-
               <div className="generated-output-details">
 
                 <span className="generated-output-status">
@@ -6175,6 +6137,27 @@ const handleOpenGeneratedImageInCanva = async () => {
 
                 )}
 
+                
+<div
+  style={{
+    display: "flex",
+    gap: "10px",
+    flexWrap: "wrap",
+    marginTop: "16px",
+  }}
+>
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={handleOpenGeneratedImageInCanva}
+    disabled={isCreatingCanvaDesign}
+  >
+    {isCreatingCanvaDesign
+      ? "Opening Canva..."
+      : "Open / Edit in Canva"}
+  </button>
+</div>
+
 {canvaMessage && (
   <div
     style={{
@@ -6200,75 +6183,6 @@ const handleOpenGeneratedImageInCanva = async () => {
         Reopen editable Canva design
       </a>
     )}
-    {canvaDesignId && (
-      <small
-        style={{
-          display: "block",
-          marginTop: "5px",
-          opacity: 0.65,
-        }}
-      >
-        Canva design: {canvaDesignId}
-      </small>
-    )}
-  </div>
-)}
-<div
-  style={{
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-    width: "100%",
-    marginTop: "12px",
-  }}
->
-  <button
-    type="button"
-    className="secondary-button"
-    onClick={handleOpenGeneratedImageInCanva}
-    disabled={
-      !generatedImageFilename ||
-      isCreatingCanvaDesign
-    }
-  >
-    {isCreatingCanvaDesign
-      ? "Opening Canva..."
-      : "Open / Edit in Canva"}
-  </button>
-</div>
-
-{canvaMessage && (
-  <div
-    style={{
-      width: "100%",
-      marginTop: "10px",
-      padding: "10px 12px",
-      borderRadius: "10px",
-      border:
-        "1px solid rgba(120, 100, 255, 0.25)",
-      background:
-        "rgba(120, 100, 255, 0.07)",
-    }}
-  >
-    <p style={{ margin: 0 }}>
-      {canvaMessage}
-    </p>
-
-    {canvaEditUrl && (
-      <a
-        href={canvaEditUrl}
-        target="_blank"
-        rel="noreferrer"
-        style={{
-          display: "inline-block",
-          marginTop: "7px",
-          fontWeight: 700,
-        }}
-      >
-        Reopen editable Canva design
-      </a>
-    )}
-
     {canvaDesignId && (
       <small
         style={{
@@ -7005,6 +6919,7 @@ const handleOpenGeneratedImageInCanva = async () => {
                 video/webm,
                 video/quicktime
               "
+              multiple
               onChange={
                 handleFileInputChange
               }
