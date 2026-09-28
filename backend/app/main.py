@@ -15,6 +15,12 @@ from fastapi import (
     UploadFile,
     Body,
 )
+from app.services.canva_connect_service import canva_connect_service
+from fastapi.responses import (
+    FileResponse,
+    StreamingResponse,
+    HTMLResponse,
+)
 
 from fastapi.middleware.cors import (
     CORSMiddleware,
@@ -2387,7 +2393,174 @@ def health():
         "status": "ok"
     }
 
+# -------------------------------------------------------------------
+# Canva Connect OAuth / generated-image editing
+# -------------------------------------------------------------------
 
+@app.get("/api/canva/connect/oauth/status")
+async def canva_connect_oauth_status():
+    """Return whether Canva Connect is configured and authenticated."""
+    try:
+        return await canva_connect_service.status()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to check Canva connection: {exc}",
+        ) from exc
+
+
+@app.get("/api/canva/connect/oauth/start")
+async def canva_connect_oauth_start():
+    """Create the Canva OAuth authorization URL."""
+    try:
+        return {
+            "authorization_url": canva_connect_service.authorization_url(),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        ) from exc
+
+
+@app.get("/api/canva/connect/oauth/callback")
+async def canva_connect_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Receive Canva OAuth callback and store the resulting token."""
+    import html
+
+    if error:
+        message = html.escape(error_description or error)
+
+        return HTMLResponse(
+            content=(
+                "<!doctype html><html><body style='font-family:Arial;padding:40px'>"
+                "<h2>Canva connection failed</h2>"
+                f"<p>{message}</p>"
+                "<p>Close this window and return to the Image Generator.</p>"
+                "</body></html>"
+            ),
+            status_code=400,
+        )
+
+    if not code:
+        return HTMLResponse(
+            content=(
+                "<!doctype html><html><body style='font-family:Arial;padding:40px'>"
+                "<h2>Canva connection failed</h2>"
+                "<p>No authorization code was returned.</p>"
+                "</body></html>"
+            ),
+            status_code=400,
+        )
+
+    try:
+        await canva_connect_service.exchange_code(code, state)
+
+        return HTMLResponse(
+            content=(
+                "<!doctype html><html><body style='font-family:Arial;padding:40px'>"
+                "<h2>Canva connected successfully</h2>"
+                "<p>You can close this window and return to the Image Generator.</p>"
+                "</body></html>"
+            ),
+            status_code=200,
+        )
+
+    except Exception as exc:
+        message = html.escape(str(exc))
+
+        return HTMLResponse(
+            content=(
+                "<!doctype html><html><body style='font-family:Arial;padding:40px'>"
+                "<h2>Canva authorization failed</h2>"
+                f"<p>{message}</p>"
+                "<p>Close this window and try Connect Canva again.</p>"
+                "</body></html>"
+            ),
+            status_code=400,
+        )
+
+
+@app.post("/api/canva/create-from-generated-image")
+async def canva_create_from_generated_image(
+    filename: str = Form(...),
+    design_type: str = Form("poster"),
+):
+    """Create an editable Canva design from the generated local image."""
+
+    safe_name = Path(filename).name
+
+    if not safe_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
+
+    local_path = IMAGE_OUTPUT_DIR / safe_name
+
+    if not local_path.exists() or not local_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found on the server.",
+        )
+
+    try:
+        result = (
+            await canva_connect_service.create_editable_design_from_local_image(
+                local_path
+            )
+        )
+
+        return {
+            **result,
+            "message": result.get(
+                "message",
+                "The generated image was uploaded to Canva and placed in an editable Canva design.",
+            ),
+        }
+
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+
+        if any(
+            phrase in lowered
+            for phrase in (
+                "not authorized",
+                "not configured",
+                "authorization",
+                "oauth",
+                "connect canva",
+                "reconnect canva",
+            )
+        ):
+            try:
+                authorization_url = (
+                    canva_connect_service.authorization_url()
+                )
+            except Exception:
+                authorization_url = ""
+
+            raise HTTPException(
+                status_code=401,
+                detail=message,
+                headers={
+                    "X-Canva-Authorization-URL": authorization_url,
+                },
+            ) from exc
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unable to create the editable Canva design: "
+                f"{message}"
+            ),
+        ) from exc
 # -------------------------------------------------------------------
 # Get input files
 # -------------------------------------------------------------------
