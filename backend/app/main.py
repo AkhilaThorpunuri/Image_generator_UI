@@ -125,6 +125,17 @@ CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE = BASE_DIR / "token.json"
 DRIVE_CONFIG_FILE = BASE_DIR / "drive_config.json"
 
+# Railway/deployment support:
+# Local development can continue using backend/credentials.json and
+# backend/token.json. Railway can securely provide the same OAuth JSON
+# documents through environment variables instead of committing secrets.
+DRIVE_CREDENTIALS_ENV = "GOOGLE_DRIVE_CREDENTIALS_JSON_B64"
+DRIVE_TOKEN_ENV = "GOOGLE_DRIVE_TOKEN_JSON_B64"
+DRIVE_CREDENTIALS_ENV_LEGACY = "GOOGLE_OAUTH_CREDENTIALS_JSON"
+DRIVE_TOKEN_ENV_LEGACY = "GOOGLE_OAUTH_TOKEN_JSON"
+DRIVE_FOLDER_ENV = "GOOGLE_DRIVE_FOLDER_ID"
+DRIVE_OUTPUT_FOLDER_ENV = "GOOGLE_DRIVE_OUTPUT_FOLDER_ID"
+
 API_KEY_STATE = {
     "keys": {},
     "selected_ids": [],
@@ -1183,19 +1194,117 @@ def normalize_drive_folder_id(value: str) -> str:
     return value
 
 
+def _decode_json_secret(value: str, label: str) -> dict:
+    """Decode a raw JSON or base64-encoded JSON deployment secret."""
+    raw = str(value or "").strip()
+    if not raw:
+        raise RuntimeError(f"{label} configuration is empty.")
+
+    # Prefer raw JSON when it is supplied directly as an environment variable.
+    if raw.startswith("{") or raw.startswith("["):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{label} configuration is not valid JSON.") from exc
+    else:
+        try:
+            decoded = base64.b64decode(raw, validate=True).decode(
+                "utf-8",
+                errors="strict",
+            )
+        except Exception:
+            try:
+                decoded = base64.urlsafe_b64decode(raw).decode(
+                    "utf-8",
+                    errors="strict",
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{label} configuration is neither valid JSON nor valid base64 JSON."
+                ) from exc
+
+        try:
+            payload = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{label} base64 value does not contain valid JSON."
+            ) from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} configuration must contain a JSON object.")
+
+    return payload
+
+
+def _load_drive_client_config() -> dict | None:
+    """Load Google OAuth client configuration from env first, then credentials.json."""
+    env_value = (
+        os.getenv(DRIVE_CREDENTIALS_ENV, "").strip()
+        or os.getenv(DRIVE_CREDENTIALS_ENV_LEGACY, "").strip()
+    )
+    if env_value:
+        return _decode_json_secret(env_value, "Google Drive OAuth credentials")
+
+    if CREDENTIALS_FILE.exists():
+        try:
+            payload = json.loads(
+                CREDENTIALS_FILE.read_text(encoding="utf-8")
+            )
+            if isinstance(payload, dict):
+                return payload
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "Google Drive credentials.json could not be read."
+            ) from exc
+
+    return None
+
+
+def _load_drive_token_config() -> dict | None:
+    """Load authorized-user token from env first, then token.json."""
+    env_value = (
+        os.getenv(DRIVE_TOKEN_ENV, "").strip()
+        or os.getenv(DRIVE_TOKEN_ENV_LEGACY, "").strip()
+    )
+    if env_value:
+        return _decode_json_secret(env_value, "Google Drive OAuth token")
+
+    if TOKEN_FILE.exists():
+        try:
+            payload = json.loads(
+                TOKEN_FILE.read_text(encoding="utf-8")
+            )
+            if isinstance(payload, dict):
+                return payload
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "Google Drive token.json could not be read."
+            ) from exc
+
+    return None
+
+
+def _drive_credentials_configured() -> bool:
+    return _load_drive_client_config() is not None
+
+
+def _drive_token_configured() -> bool:
+    return _load_drive_token_config() is not None
+
+
 def drive_oauth_available() -> bool:
-    return CREDENTIALS_FILE.exists()
+    return _drive_credentials_configured()
 
 
 def drive_oauth_selected() -> bool:
     """
-    Google Drive is available when its OAuth files and folder configuration
-    are present. It does not depend on the frontend selecting a synthetic
-    "Google Drive API" checkbox.
+    Google Drive is available when OAuth configuration, an authorized token,
+    and the Drive folder configuration are present. It does not depend on the
+    frontend selecting a synthetic "Google Drive API" checkbox.
     """
     return (
-        CREDENTIALS_FILE.exists()
-        and TOKEN_FILE.exists()
+        _drive_credentials_configured()
+        and _drive_token_configured()
         and bool(
             normalize_drive_folder_id(
                 API_KEY_STATE.get("drive_folder_id", "")
@@ -1206,36 +1315,61 @@ def drive_oauth_selected() -> bool:
 
 
 def get_drive_service():
-    if not CREDENTIALS_FILE.exists():
+    """
+    Return an authenticated Google Drive service.
+
+    Local development uses backend/credentials.json and backend/token.json.
+    Railway/deployments can instead provide those same JSON documents through:
+      GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_DRIVE_TOKEN_JSON_B64
+    or the legacy raw-JSON variables:
+      GOOGLE_OAUTH_CREDENTIALS_JSON / GOOGLE_OAUTH_TOKEN_JSON
+    """
+    client_config = _load_drive_client_config()
+    if not client_config:
         raise RuntimeError(
-            "Google Drive OAuth credentials.json was not found in the backend folder."
+            "Google Drive OAuth credentials were not found. Provide "
+            "backend/credentials.json locally or configure "
+            "GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_OAUTH_CREDENTIALS_JSON on Railway."
+        )
+
+    token_config = _load_drive_token_config()
+    if not token_config:
+        raise RuntimeError(
+            "Google Drive OAuth token was not found. Provide backend/token.json locally "
+            "or configure GOOGLE_DRIVE_TOKEN_JSON_B64 / GOOGLE_OAUTH_TOKEN_JSON on Railway."
         )
 
     credentials = None
+    try:
+        credentials = Credentials.from_authorized_user_info(
+            token_config,
+            DRIVE_SCOPES,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Google Drive OAuth token is invalid or incomplete."
+        ) from exc
 
-    if TOKEN_FILE.exists():
-        try:
-            credentials = Credentials.from_authorized_user_file(
-                str(TOKEN_FILE),
-                DRIVE_SCOPES,
-            )
-        except Exception:
-            credentials = None
-
-    if credentials and credentials.valid:
+    if credentials.valid:
         return build(
             "drive",
             "v3",
             credentials=credentials,
         )
 
-    if credentials and credentials.expired and credentials.refresh_token:
+    if credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(GoogleAuthRequest())
-            TOKEN_FILE.write_text(
-                credentials.to_json(),
-                encoding="utf-8",
-            )
+
+            # Preserve the existing local behavior when token.json exists.
+            # Environment-backed Railway credentials are intentionally not
+            # written back to disk or exposed in application responses.
+            if TOKEN_FILE.exists():
+                TOKEN_FILE.write_text(
+                    credentials.to_json(),
+                    encoding="utf-8",
+                )
+
             return build(
                 "drive",
                 "v3",
@@ -1244,13 +1378,15 @@ def get_drive_service():
         except Exception as exc:
             raise RuntimeError(
                 "Google Drive authorization has expired and could not be refreshed. "
-                "Run 'python test_google_drive.py' once to authorize again."
+                "Refresh the OAuth token or run 'python test_google_drive.py' locally "
+                "to authorize again."
             ) from exc
 
     raise RuntimeError(
-        "Google Drive is not authorized yet. Run 'python test_google_drive.py' "
-        "once from the backend folder, then restart the backend."
+        "Google Drive is not authorized. Provide a valid authorized-user token "
+        "with a refresh token, or run 'python test_google_drive.py' locally to authorize again."
     )
+
 
 
 def require_drive_configuration():
@@ -1287,19 +1423,23 @@ def require_drive_configuration():
             ),
         )
 
-    if not CREDENTIALS_FILE.exists():
+    if not _drive_credentials_configured():
         raise HTTPException(
             status_code=500,
             detail=(
-                "Google Drive credentials.json was not found in the backend folder."
+                "Google Drive OAuth credentials were not found. Configure "
+                "GOOGLE_DRIVE_CREDENTIALS_JSON_B64 / GOOGLE_OAUTH_CREDENTIALS_JSON "
+                "on Railway, or provide backend/credentials.json locally."
             ),
         )
 
-    if not TOKEN_FILE.exists():
+    if not _drive_token_configured():
         raise HTTPException(
             status_code=500,
             detail=(
-                "Google Drive token.json was not found in the backend folder."
+                "Google Drive OAuth token was not found. Configure "
+                "GOOGLE_DRIVE_TOKEN_JSON_B64 / GOOGLE_OAUTH_TOKEN_JSON "
+                "on Railway, or provide backend/token.json locally."
             ),
         )
 
