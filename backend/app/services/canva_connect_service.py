@@ -414,28 +414,40 @@ class CanvaConnectService:
             f"Timed out waiting for Canva to import '{path.name}'."
         )
 
-    async def create_editable_design_from_local_image(
-    self,
-    local_path: Path,
-) -> dict:
-    """
-    Upload the generated image to Canva and convert it into a
-    Canva design with separately editable layers.
-    """
+        async def create_editable_design_from_local_image(
+        self,
+        local_path: Path,
+    ) -> dict:
+        """Create an editable Canva design from the generated image."""
 
-    asset_id = await self.upload_asset(local_path)
+        asset_id = await self.upload_asset(local_path)
 
-    # Start Canva's Image-to-Design import job.
-    result = await self._request(
-        "POST",
-        "/image-to-design-imports",
-        json={
-            "image": {
-                "asset_id": asset_id,
-            },
-            "title": Path(local_path).stem[:255],
-        },
-    )
+        result = await self.create_design_from_asset(
+            asset_id,
+            local_path,
+            Path(local_path).stem,
+        )
+
+        design = result.get("design") or {}
+        urls = design.get("urls") or {}
+
+        return {
+            "success": True,
+            "design_id": str(
+                design.get("id") or ""
+            ),
+            "edit_url": str(
+                urls.get("edit_url") or ""
+            ),
+            "view_url": str(
+                urls.get("view_url") or ""
+            ),
+            "asset_id": asset_id,
+            "title": (
+                design.get("title")
+                or Path(local_path).stem
+            ),
+        }
 
     job = result.get("job") or {}
     job_id = str(job.get("id") or "")
