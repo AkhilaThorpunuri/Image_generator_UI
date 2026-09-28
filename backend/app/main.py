@@ -1,3 +1,4 @@
+
 from pathlib import Path
 import io
 import json
@@ -837,379 +838,7 @@ def _pipeline_template(pipeline_item: dict, **kwargs):
     if service=="gemini": return _with_pipeline_key(pipeline_item,lambda:generate_template(**kwargs))
     return _generic_template(pipeline_item,Path(path))
 
-def _pipeline_text_key_is_usable(item: dict) -> bool:
-    """Return True when a selected API can analyze an image and text."""
-    if not item or item.get("auth_type") == "oauth":
-        return False
 
-    if not str(item.get("value", "")).strip():
-        return False
-
-    try:
-        return bool(
-            _provider_base_url(item)
-            and _provider_text_model(item)
-        )
-    except Exception:
-        return False
-
-
-def _selected_text_candidates() -> list[tuple[str, dict]]:
-    """Return selected APIs that can perform edit planning."""
-    return [
-        (key_id, item)
-        for key_id, item in _selected_pipeline_candidates()
-        if _pipeline_text_key_is_usable(item)
-    ]
-
-
-def _gemini_chat_with_image(
-    api_key: str,
-    path: Path,
-    instruction: str,
-    model: str,
-) -> str:
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=api_key)
-
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            types.Part.from_text(text=instruction),
-            types.Part.from_bytes(
-                data=path.read_bytes(),
-                mime_type=get_mime_type(path),
-            ),
-        ],
-    )
-
-    text = str(
-        getattr(response, "text", "") or ""
-    ).strip()
-
-    if text:
-        return text
-
-    candidates = getattr(
-        response,
-        "candidates",
-        None,
-    ) or []
-
-    parts = []
-
-    for candidate in candidates:
-        content = getattr(
-            candidate,
-            "content",
-            None,
-        )
-
-        for part in getattr(
-            content,
-            "parts",
-            None,
-        ) or []:
-            part_text = getattr(
-                part,
-                "text",
-                None,
-            )
-
-            if part_text:
-                parts.append(
-                    str(part_text)
-                )
-
-    text = "\n".join(parts).strip()
-
-    if not text:
-        raise RuntimeError(
-            "Gemini returned no text for the image edit plan."
-        )
-
-    return text
-
-
-def _pipeline_chat_with_image(
-    pipeline_item: dict,
-    reference_path: Path,
-    instruction: str,
-) -> str:
-    """Run the vision/text planning request using a selected API."""
-    service = str(
-        pipeline_item.get("service") or ""
-    ).strip().lower()
-
-    api_key = str(
-        pipeline_item.get("value") or ""
-    ).strip()
-
-    model = str(
-        _provider_text_model(pipeline_item) or ""
-    ).strip()
-
-    if not api_key or not model:
-        raise RuntimeError(
-            "The selected API cannot perform edit planning."
-        )
-
-    if service == "gemini":
-        return _with_pipeline_key(
-            pipeline_item,
-            lambda: _gemini_chat_with_image(
-                api_key,
-                reference_path,
-                instruction,
-                model,
-            ),
-        )
-
-    if service == "openrouter":
-        return _openrouter_chat_with_image(
-            api_key,
-            reference_path,
-            instruction,
-            model,
-        )
-
-    return _generic_chat_with_image(
-        pipeline_item,
-        reference_path,
-        instruction,
-    )
-
-
-def _normalize_change_plan(raw: str) -> dict:
-    parsed = _extract_json_object(raw)
-
-    if not isinstance(parsed, dict):
-        raise RuntimeError(
-            "The selected API returned an invalid edit plan."
-        )
-
-    changes = parsed.get("changes", [])
-    visual_changes = parsed.get(
-        "visual_changes",
-        [],
-    )
-    global_instructions = parsed.get(
-        "global_instructions",
-        [],
-    )
-    must_preserve = parsed.get(
-        "must_preserve",
-        [],
-    )
-
-    if not isinstance(changes, list):
-        changes = []
-
-    if not isinstance(visual_changes, list):
-        visual_changes = []
-
-    if not isinstance(global_instructions, list):
-        global_instructions = []
-
-    if not isinstance(must_preserve, list):
-        must_preserve = []
-
-    normalized_changes = []
-
-    for index, value in enumerate(
-        changes[:100],
-        start=1,
-    ):
-        if not isinstance(value, dict):
-            continue
-
-        action = str(
-            value.get("action") or "replace"
-        ).strip().lower()
-
-        if action not in {
-            "replace",
-            "remove",
-            "add",
-            "update",
-            "keep",
-        }:
-            action = "update"
-
-        normalized_changes.append(
-            {
-                "id": str(
-                    value.get("id")
-                    or f"change_{index}"
-                ),
-                "target": str(
-                    value.get("target") or ""
-                ),
-                "action": action,
-                "original_text": str(
-                    value.get("original_text")
-                    or ""
-                ),
-                "new_text": str(
-                    value.get("new_text")
-                    or ""
-                ),
-                "details": str(
-                    value.get("details")
-                    or ""
-                ),
-            }
-        )
-
-    normalized_visual = []
-
-    for index, value in enumerate(
-        visual_changes[:100],
-        start=1,
-    ):
-        if not isinstance(value, dict):
-            continue
-
-        normalized_visual.append(
-            {
-                "id": str(
-                    value.get("id")
-                    or f"visual_{index}"
-                ),
-                "target": str(
-                    value.get("target") or ""
-                ),
-                "action": str(
-                    value.get("action")
-                    or "update"
-                ),
-                "from": str(
-                    value.get("from") or ""
-                ),
-                "to": str(
-                    value.get("to") or ""
-                ),
-                "details": str(
-                    value.get("details")
-                    or ""
-                ),
-            }
-        )
-
-    return {
-        "changes": normalized_changes,
-        "visual_changes": normalized_visual,
-        "global_instructions": [
-            str(value).strip()
-            for value in global_instructions
-            if str(value).strip()
-        ][:50],
-        "must_preserve": [
-            str(value).strip()
-            for value in must_preserve
-            if str(value).strip()
-        ][:50],
-    }
-
-
-def _build_change_plan(
-    pipeline_item: dict,
-    reference_path: Path,
-    user_prompt: str,
-    template: dict,
-) -> dict:
-    """Convert free-form user instructions into explicit edit operations."""
-
-    template_payload = (
-        template.get("template", template)
-        if isinstance(template, dict)
-        else {}
-    )
-
-    instruction = f"""
-You are a precise image/poster editor.
-
-Analyze the supplied reference image, its template information,
-and the user's request.
-
-Your job is to convert ONLY the requested changes into a structured
-edit plan for another image-generation model.
-
-IMPORTANT RULES:
-
-1. Preserve the original design unless the user explicitly asks
-   for a change.
-
-2. Preserve layout, composition, logos, people, objects, colors,
-   background, spacing and typography hierarchy by default.
-
-3. When the user says CHANGE X TO Y:
-   create an explicit replacement from X to Y.
-
-4. When the user says REMOVE X:
-   create action "remove".
-
-5. When the user says ADD X:
-   create action "add" and copy the requested text exactly.
-
-6. NEVER invent dates, names, phone numbers, URLs, titles,
-   contact details or other factual content.
-
-7. Requested replacement text must be copied exactly,
-   including spelling, capitalization, numbers and punctuation.
-
-8. Put visual changes in visual_changes.
-
-9. Include every explicit requested change separately.
-
-10. Do not create additional changes that the user did not request.
-
-Return ONLY valid JSON:
-
-{{
-  "changes": [
-    {{
-      "id": "change_1",
-      "target": "main heading",
-      "action": "replace",
-      "original_text": "OLD TEXT",
-      "new_text": "NEW TEXT",
-      "details": "Keep the same position and typography hierarchy"
-    }}
-  ],
-  "visual_changes": [
-    {{
-      "id": "visual_1",
-      "target": "background",
-      "action": "update",
-      "from": "blue",
-      "to": "green",
-      "details": "Only change the requested background"
-    }}
-  ],
-  "global_instructions": [],
-  "must_preserve": []
-}}
-
-REFERENCE TEMPLATE:
-{json.dumps(
-    template_payload,
-    ensure_ascii=False
-)[:20000]}
-
-USER REQUEST:
-{user_prompt.strip()}
-"""
-
-    return _normalize_change_plan(
-        _pipeline_chat_with_image(
-            pipeline_item,
-            reference_path,
-            instruction,
-        )
-    )
 def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str) -> tuple[bytes,str]:
     service=pipeline_item.get("service")
     key=str(pipeline_item.get("value","")).strip()
@@ -3432,69 +3061,7 @@ def _resolve_generation_reference(source_type: str, source: str, filename: str, 
     if not path.exists() or not is_valid_image_file(path): raise HTTPException(status_code=400, detail="The selected reference is not a readable image.")
     return path, content_type or get_mime_type(path)
 
-def _generation_instruction(
-    prompt: str,
-    template_json: str = "{}",
-) -> str:
-    return f"""
-Edit the supplied reference image according to the user's request.
-
-IMPORTANT:
-Apply ONLY the changes explicitly requested by the user.
-
-PRESERVE EVERYTHING ELSE:
-- original composition
-- original layout
-- logo placement
-- branding
-- people
-- objects
-- background
-- colors
-- decorative elements
-- spacing
-- typography hierarchy
-- overall visual style
-
-TEXT CHANGES:
-- Change only the text explicitly mentioned by the user.
-- Use the exact replacement text supplied by the user.
-- Preserve spelling exactly.
-- Preserve capitalization exactly.
-- Preserve numbers exactly.
-- Preserve punctuation exactly.
-- Keep the original text position and style unless the user explicitly asks for them to change.
-
-REMOVALS:
-- Remove only the item explicitly requested by the user.
-- Do not remove other text, objects, logos, or decorations.
-
-ADDITIONS:
-- Add only what the user explicitly requests.
-- Use the exact text supplied by the user.
-- Do not invent any extra content.
-
-VISUAL CHANGES:
-- Apply only explicitly requested visual changes.
-- Do not redesign the reference.
-- Do not introduce additional colors, objects, backgrounds, decorations, or effects unless requested.
-
-DO NOT INVENT:
-- names
-- dates
-- phone numbers
-- email addresses
-- URLs
-- prices
-- contact details
-- titles
-- any other factual content
-
-USER REQUEST:
-{prompt.strip()}
-"""
-
-
+def _generation_instruction(prompt: str, template_json: str = "{}") -> str:
     # Template generation is intentionally disabled. The reference image and
     # the user's manual prompt are the only design inputs.
     return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
@@ -4042,17 +3609,108 @@ async def generate_output_image(
 
     # Require at least one selected image-capable key, then try selected keys
     # in order. A failed/limited key must not block another selected key.
+    _require_pipeline_key()
     reference_path, _ = _resolve_generation_reference(
-        source_type,
-        source,
-        filename,
-        content_type,
+        source_type, source, filename, content_type
     )
+    instruction = _generation_instruction(prompt, template_json)
 
-    instruction = _generation_instruction(
-        prompt,
-        template_json,
-    )   
+    selected_candidates = [
+        (candidate_id, candidate_item)
+        for candidate_id, candidate_item in _selected_pipeline_candidates()
+        if _pipeline_key_is_usable(candidate_item)
+    ]
+    errors = []
+    image_bytes = None
+    image_model = ""
+    key_id = ""
+    item = None
+
+    for candidate_id, candidate_item in selected_candidates:
+        try:
+            candidate_bytes, candidate_model = _pipeline_image(
+                candidate_item,
+                reference_path,
+                instruction,
+            )
+            image_bytes = candidate_bytes
+            image_model = candidate_model
+            key_id = candidate_id
+            item = candidate_item
+            API_KEY_STATE["pipeline_key_id"] = candidate_id
+            break
+        except Exception as exc:
+            errors.append(
+                f"{candidate_item.get('display_name', candidate_id)}: {exc}"
+            )
+
+    if image_bytes is None or item is None:
+        detail = " | ".join(errors) if errors else "No selected API key can generate images."
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Image generation failed for all selected image-capable API keys. "
+                f"{detail}"
+            ),
+        )
+
+    output_name = _safe_output_name(filename)
+    output_path = IMAGE_OUTPUT_DIR / output_name
+    output_path.write_bytes(image_bytes)
+
+    # Description is part of the final generation transaction so it cannot be
+    # silently lost after an otherwise successful image generation. Try the
+    # API key that actually generated the image first, then the other selected
+    # image-capable keys. A description failure must never delete/block the
+    # generated image.
+    description = ""
+    description_errors = []
+    description_candidates = [(key_id, item)]
+    for candidate_id, candidate_item in selected_candidates:
+        if candidate_id != key_id:
+            description_candidates.append((candidate_id, candidate_item))
+
+    for description_key_id, description_item in description_candidates:
+        try:
+            description = _pipeline_description(
+                description_item, output_path, prompt.strip()
+            )
+            if description:
+                break
+        except Exception as exc:
+            description_errors.append(
+                f"{description_item.get('display_name', description_key_id)}: {exc}"
+            )
+
+    # Always return a visible description string even if every selected AI
+    # provider refuses the vision-description request. This fallback describes
+    # the generated asset from the user's actual request rather than inventing
+    # visual details.
+    if not description:
+        description = (
+            f"Generated image based on the requested content: {prompt.strip()}"
+            if prompt.strip()
+            else "Generated image created successfully from the selected reference."
+        )
+
+    return {
+        "success": True,
+        "image_url": f"/api/images/output/{quote(output_name)}",
+        "filename": output_name,
+        "model": image_model,
+        "provider": item.get("display_name", "Selected API"),
+        "api_id": key_id,
+        "pipeline_api_id": key_id,
+        "selected_api_count": len(API_KEY_STATE.get("selected_ids", [])),
+        "description": description,
+        "description_provider": (
+            item.get("display_name", "Selected API")
+            if not description_errors
+            else "Generated-image fallback"
+        ),
+        "description_warning": " | ".join(description_errors) if description_errors else "",
+        "changes": {},
+    }
 
 @app.post("/api/social-media/generate")
 async def generate_social_media_description(
