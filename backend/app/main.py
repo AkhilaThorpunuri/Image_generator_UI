@@ -3495,10 +3495,6 @@ USER REQUEST:
 """
 
 
-    # Template generation is intentionally disabled. The reference image and
-    # the user's manual prompt are the only design inputs.
-    return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
-
 def _gemini_image(api_key: str, path: Path, instruction: str) -> bytes:
     from google import genai
     from google.genai import types
@@ -4042,8 +4038,6 @@ async def generate_output_image(
 
     # Require at least one selected image-capable key, then try selected keys
     # in order. A failed/limited key must not block another selected key.
-    _require_pipeline_key()
-
     reference_path, _ = _resolve_generation_reference(
         source_type,
         source,
@@ -4054,73 +4048,7 @@ async def generate_output_image(
     instruction = _generation_instruction(
         prompt,
         template_json,
-    )
-
-    selected_candidates = [
-        (candidate_id, candidate_item)
-        for candidate_id, candidate_item in _selected_pipeline_candidates()
-        if _pipeline_key_is_usable(candidate_item)
-    ]
-
-    errors = []
-    image_bytes = None
-    image_model = ""
-    key_id = ""
-    item = None
-
-    for candidate_id, candidate_item in selected_candidates:
-        try:
-            candidate_bytes, candidate_model = _pipeline_image(
-                candidate_item,
-                reference_path,
-                instruction,
-            )
-
-            image_bytes = candidate_bytes
-            image_model = candidate_model
-            key_id = candidate_id
-            item = candidate_item
-
-            API_KEY_STATE["pipeline_key_id"] = candidate_id
-            break
-
-        except Exception as exc:
-            errors.append(
-                f"{candidate_item.get('display_name', candidate_id)}: {exc}"
-            )
-
-    if image_bytes is None or item is None:
-        detail = (
-            " | ".join(errors)
-            if errors
-            else "No selected API key can generate images."
-        )
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Image generation failed for all selected image-capable API keys. "
-                f"{detail}"
-            ),
-        )
-
-    output_name = _safe_output_name(filename)
-    (IMAGE_OUTPUT_DIR / output_name).write_bytes(image_bytes)
-
-    return {
-        "success": True,
-        "image_url": f"/api/images/output/{quote(output_name)}",
-        "filename": output_name,
-        "model": image_model,
-        "provider": item.get("display_name", "Selected API"),
-        "api_id": key_id,
-        "pipeline_api_id": key_id,
-        "selected_api_count": len(
-            API_KEY_STATE.get("selected_ids", [])
-        ),
-        "changes": {},
-    }
-
+    )   
 
 @app.post("/api/social-media/generate")
 async def generate_social_media_description(
