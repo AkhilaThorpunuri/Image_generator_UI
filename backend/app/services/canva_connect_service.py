@@ -11,31 +11,13 @@ from urllib.parse import urlencode
 
 import httpx
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    load_dotenv = None
-
-# Load backend/.env for local development. Environment variables already set
-# by the process take precedence by using override=False.
-if load_dotenv is not None:
-    load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
-
 
 class CanvaConnectService:
     """Local-only Canva Connect OAuth + asset/design/export integration."""
 
     API_BASE = "https://api.canva.com/rest/v1"
     AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
-    @property
-def redirect_uri(self) -> str:
-    return (
-        os.getenv("CANVA_CONNECT_REDIRECT_URI", "").strip()
-        or "http://127.0.0.1:8000/api/canva/connect/oauth/callback"
-    )
 
-    # These are the Connect permissions required by this application:
-    # upload the generated image, create the design, and export the final design.
     SCOPES = [
         "asset:write",
         "design:content:write",
@@ -51,24 +33,33 @@ def redirect_uri(self) -> str:
 
     @property
     def client_id(self) -> str:
-        return (
-            os.getenv("CANVA_CONNECT_CLIENT_ID", "").strip()
-            or os.getenv("CANVA_CLIENT_ID", "").strip()
-        )
+        return os.getenv(
+            "CANVA_CONNECT_CLIENT_ID",
+            "",
+        ).strip()
 
     @property
     def client_secret(self) -> str:
+        return os.getenv(
+            "CANVA_CONNECT_CLIENT_SECRET",
+            "",
+        ).strip()
+
+    @property
+    def redirect_uri(self) -> str:
         return (
-            os.getenv("CANVA_CONNECT_CLIENT_SECRET", "").strip()
-            or os.getenv("CANVA_CLIENT_SECRET", "").strip()
+            os.getenv(
+                "CANVA_CONNECT_REDIRECT_URI",
+                "",
+            ).strip()
+            or "http://127.0.0.1:8000/api/canva/connect/oauth/callback"
         )
 
     def _require_credentials(self) -> None:
         if not self.client_id or not self.client_secret:
             raise RuntimeError(
-                "Canva Connect credentials are missing. Set CANVA_CONNECT_CLIENT_ID "
-                "and CANVA_CONNECT_CLIENT_SECRET (or CANVA_CLIENT_ID and "
-                "CANVA_CLIENT_SECRET) in backend/.env or the backend environment."
+                "CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET "
+                "must be set in the backend environment."
             )
 
     def _read_tokens(self) -> dict:
