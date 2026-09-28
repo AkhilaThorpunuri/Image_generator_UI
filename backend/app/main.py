@@ -837,7 +837,379 @@ def _pipeline_template(pipeline_item: dict, **kwargs):
     if service=="gemini": return _with_pipeline_key(pipeline_item,lambda:generate_template(**kwargs))
     return _generic_template(pipeline_item,Path(path))
 
+def _pipeline_text_key_is_usable(item: dict) -> bool:
+    """Return True when a selected API can analyze an image and text."""
+    if not item or item.get("auth_type") == "oauth":
+        return False
 
+    if not str(item.get("value", "")).strip():
+        return False
+
+    try:
+        return bool(
+            _provider_base_url(item)
+            and _provider_text_model(item)
+        )
+    except Exception:
+        return False
+
+
+def _selected_text_candidates() -> list[tuple[str, dict]]:
+    """Return selected APIs that can perform edit planning."""
+    return [
+        (key_id, item)
+        for key_id, item in _selected_pipeline_candidates()
+        if _pipeline_text_key_is_usable(item)
+    ]
+
+
+def _gemini_chat_with_image(
+    api_key: str,
+    path: Path,
+    instruction: str,
+    model: str,
+) -> str:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+
+    response = client.models.generate_content(
+        model=model,
+        contents=[
+            types.Part.from_text(text=instruction),
+            types.Part.from_bytes(
+                data=path.read_bytes(),
+                mime_type=get_mime_type(path),
+            ),
+        ],
+    )
+
+    text = str(
+        getattr(response, "text", "") or ""
+    ).strip()
+
+    if text:
+        return text
+
+    candidates = getattr(
+        response,
+        "candidates",
+        None,
+    ) or []
+
+    parts = []
+
+    for candidate in candidates:
+        content = getattr(
+            candidate,
+            "content",
+            None,
+        )
+
+        for part in getattr(
+            content,
+            "parts",
+            None,
+        ) or []:
+            part_text = getattr(
+                part,
+                "text",
+                None,
+            )
+
+            if part_text:
+                parts.append(
+                    str(part_text)
+                )
+
+    text = "\n".join(parts).strip()
+
+    if not text:
+        raise RuntimeError(
+            "Gemini returned no text for the image edit plan."
+        )
+
+    return text
+
+
+def _pipeline_chat_with_image(
+    pipeline_item: dict,
+    reference_path: Path,
+    instruction: str,
+) -> str:
+    """Run the vision/text planning request using a selected API."""
+    service = str(
+        pipeline_item.get("service") or ""
+    ).strip().lower()
+
+    api_key = str(
+        pipeline_item.get("value") or ""
+    ).strip()
+
+    model = str(
+        _provider_text_model(pipeline_item) or ""
+    ).strip()
+
+    if not api_key or not model:
+        raise RuntimeError(
+            "The selected API cannot perform edit planning."
+        )
+
+    if service == "gemini":
+        return _with_pipeline_key(
+            pipeline_item,
+            lambda: _gemini_chat_with_image(
+                api_key,
+                reference_path,
+                instruction,
+                model,
+            ),
+        )
+
+    if service == "openrouter":
+        return _openrouter_chat_with_image(
+            api_key,
+            reference_path,
+            instruction,
+            model,
+        )
+
+    return _generic_chat_with_image(
+        pipeline_item,
+        reference_path,
+        instruction,
+    )
+
+
+def _normalize_change_plan(raw: str) -> dict:
+    parsed = _extract_json_object(raw)
+
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            "The selected API returned an invalid edit plan."
+        )
+
+    changes = parsed.get("changes", [])
+    visual_changes = parsed.get(
+        "visual_changes",
+        [],
+    )
+    global_instructions = parsed.get(
+        "global_instructions",
+        [],
+    )
+    must_preserve = parsed.get(
+        "must_preserve",
+        [],
+    )
+
+    if not isinstance(changes, list):
+        changes = []
+
+    if not isinstance(visual_changes, list):
+        visual_changes = []
+
+    if not isinstance(global_instructions, list):
+        global_instructions = []
+
+    if not isinstance(must_preserve, list):
+        must_preserve = []
+
+    normalized_changes = []
+
+    for index, value in enumerate(
+        changes[:100],
+        start=1,
+    ):
+        if not isinstance(value, dict):
+            continue
+
+        action = str(
+            value.get("action") or "replace"
+        ).strip().lower()
+
+        if action not in {
+            "replace",
+            "remove",
+            "add",
+            "update",
+            "keep",
+        }:
+            action = "update"
+
+        normalized_changes.append(
+            {
+                "id": str(
+                    value.get("id")
+                    or f"change_{index}"
+                ),
+                "target": str(
+                    value.get("target") or ""
+                ),
+                "action": action,
+                "original_text": str(
+                    value.get("original_text")
+                    or ""
+                ),
+                "new_text": str(
+                    value.get("new_text")
+                    or ""
+                ),
+                "details": str(
+                    value.get("details")
+                    or ""
+                ),
+            }
+        )
+
+    normalized_visual = []
+
+    for index, value in enumerate(
+        visual_changes[:100],
+        start=1,
+    ):
+        if not isinstance(value, dict):
+            continue
+
+        normalized_visual.append(
+            {
+                "id": str(
+                    value.get("id")
+                    or f"visual_{index}"
+                ),
+                "target": str(
+                    value.get("target") or ""
+                ),
+                "action": str(
+                    value.get("action")
+                    or "update"
+                ),
+                "from": str(
+                    value.get("from") or ""
+                ),
+                "to": str(
+                    value.get("to") or ""
+                ),
+                "details": str(
+                    value.get("details")
+                    or ""
+                ),
+            }
+        )
+
+    return {
+        "changes": normalized_changes,
+        "visual_changes": normalized_visual,
+        "global_instructions": [
+            str(value).strip()
+            for value in global_instructions
+            if str(value).strip()
+        ][:50],
+        "must_preserve": [
+            str(value).strip()
+            for value in must_preserve
+            if str(value).strip()
+        ][:50],
+    }
+
+
+def _build_change_plan(
+    pipeline_item: dict,
+    reference_path: Path,
+    user_prompt: str,
+    template: dict,
+) -> dict:
+    """Convert free-form user instructions into explicit edit operations."""
+
+    template_payload = (
+        template.get("template", template)
+        if isinstance(template, dict)
+        else {}
+    )
+
+    instruction = f"""
+You are a precise image/poster editor.
+
+Analyze the supplied reference image, its template information,
+and the user's request.
+
+Your job is to convert ONLY the requested changes into a structured
+edit plan for another image-generation model.
+
+IMPORTANT RULES:
+
+1. Preserve the original design unless the user explicitly asks
+   for a change.
+
+2. Preserve layout, composition, logos, people, objects, colors,
+   background, spacing and typography hierarchy by default.
+
+3. When the user says CHANGE X TO Y:
+   create an explicit replacement from X to Y.
+
+4. When the user says REMOVE X:
+   create action "remove".
+
+5. When the user says ADD X:
+   create action "add" and copy the requested text exactly.
+
+6. NEVER invent dates, names, phone numbers, URLs, titles,
+   contact details or other factual content.
+
+7. Requested replacement text must be copied exactly,
+   including spelling, capitalization, numbers and punctuation.
+
+8. Put visual changes in visual_changes.
+
+9. Include every explicit requested change separately.
+
+10. Do not create additional changes that the user did not request.
+
+Return ONLY valid JSON:
+
+{{
+  "changes": [
+    {{
+      "id": "change_1",
+      "target": "main heading",
+      "action": "replace",
+      "original_text": "OLD TEXT",
+      "new_text": "NEW TEXT",
+      "details": "Keep the same position and typography hierarchy"
+    }}
+  ],
+  "visual_changes": [
+    {{
+      "id": "visual_1",
+      "target": "background",
+      "action": "update",
+      "from": "blue",
+      "to": "green",
+      "details": "Only change the requested background"
+    }}
+  ],
+  "global_instructions": [],
+  "must_preserve": []
+}}
+
+REFERENCE TEMPLATE:
+{json.dumps(
+    template_payload,
+    ensure_ascii=False
+)[:20000]}
+
+USER REQUEST:
+{user_prompt.strip()}
+"""
+
+    return _normalize_change_plan(
+        _pipeline_chat_with_image(
+            pipeline_item,
+            reference_path,
+            instruction,
+        )
+    )
 def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str) -> tuple[bytes,str]:
     service=pipeline_item.get("service")
     key=str(pipeline_item.get("value","")).strip()
@@ -3060,7 +3432,78 @@ def _resolve_generation_reference(source_type: str, source: str, filename: str, 
     if not path.exists() or not is_valid_image_file(path): raise HTTPException(status_code=400, detail="The selected reference is not a readable image.")
     return path, content_type or get_mime_type(path)
 
-def _generation_instruction(prompt: str, template_json: str = "{}") -> str:
+def _generation_instruction(
+    prompt: str,
+    template_json: str = "{}",
+    change_plan: dict | None = None,
+) -> str:
+
+    plan = (
+        change_plan
+        if isinstance(change_plan, dict)
+        else {}
+    )
+
+    return f"""
+Edit the supplied reference image into the requested final image.
+
+PRIMARY RULE:
+Follow every explicit user-requested change.
+Do not ignore any item in the structured edit plan.
+
+PRESERVE BY DEFAULT:
+- original composition
+- original layout
+- logo placement
+- branding
+- people and objects
+- colors
+- background
+- decorative elements
+- spacing
+- typography hierarchy
+- relative text placement
+
+TEXT EDIT RULES:
+
+- action=replace:
+  Replace ONLY the specified original text with new_text.
+
+- action=remove:
+  Remove ONLY the specified requested text.
+
+- action=add:
+  Add exactly the requested new_text.
+
+- Copy replacement text EXACTLY.
+- Preserve spelling exactly.
+- Preserve capitalization exactly.
+- Preserve numbers exactly.
+- Preserve punctuation exactly.
+- Never invent text or factual information.
+
+VISUAL EDIT RULES:
+
+Apply every explicit item in visual_changes.
+Do not introduce visual changes that the user did not request.
+
+STRUCTURED EDIT PLAN:
+{json.dumps(
+    plan,
+    ensure_ascii=False,
+    indent=2
+)[:20000]}
+
+REFERENCE TEMPLATE:
+{str(template_json or "{}")[:20000]}
+
+ORIGINAL USER REQUEST:
+{prompt.strip()}
+
+FINAL REQUIREMENT:
+Make every requested change while preserving everything else
+from the supplied reference as closely as possible.
+"""
     # Template generation is intentionally disabled. The reference image and
     # the user's manual prompt are the only design inputs.
     return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
@@ -3599,6 +4042,7 @@ async def generate_output_image(
     content_type: str = Form(""),
     prompt: str = Form(...),
     template_json: str = Form("{}"),
+    change_plan_json: str = Form("{}"),
 ):
     if not prompt.strip():
         raise HTTPException(
@@ -3609,10 +4053,153 @@ async def generate_output_image(
     # Require at least one selected image-capable key, then try selected keys
     # in order. A failed/limited key must not block another selected key.
     _require_pipeline_key()
-    reference_path, _ = _resolve_generation_reference(
-        source_type, source, filename, content_type
+
+reference_path, _ = _resolve_generation_reference(
+    source_type,
+    source,
+    filename,
+    content_type,
+)
+
+change_plan = {}
+planning_errors = []
+
+# ---------------------------------------------------------
+# 1. Use a supplied change plan when available
+# ---------------------------------------------------------
+
+try:
+    supplied_plan = json.loads(
+        change_plan_json or "{}"
     )
-    instruction = _generation_instruction(prompt, template_json)
+
+    if isinstance(
+        supplied_plan,
+        dict
+    ):
+        change_plan = _normalize_change_plan(
+            json.dumps(
+                supplied_plan,
+                ensure_ascii=False,
+            )
+        )
+
+except Exception:
+    change_plan = {}
+
+# ---------------------------------------------------------
+# 2. Automatically analyze the reference + user request
+# ---------------------------------------------------------
+
+if not change_plan.get("changes") and not change_plan.get(
+    "visual_changes"
+):
+
+    text_candidates = _selected_text_candidates()
+
+    template_data = {}
+
+    # Try existing template first
+    try:
+        supplied_template = json.loads(
+            template_json or "{}"
+        )
+
+        if (
+            isinstance(supplied_template, dict)
+            and supplied_template
+        ):
+            template_data = supplied_template
+
+    except Exception:
+        template_data = {}
+
+    # If template is missing, analyze the reference
+    if not template_data:
+
+        for plan_key_id, plan_item in text_candidates:
+
+            try:
+                template_data = _pipeline_template(
+                    plan_item,
+                    reference_path=reference_path,
+                )
+
+                API_KEY_STATE[
+                    "pipeline_key_id"
+                ] = plan_key_id
+
+                break
+
+            except Exception as exc:
+
+                planning_errors.append(
+                    f"{plan_item.get('display_name', plan_key_id)} "
+                    f"template: {exc}"
+                )
+
+    # Convert the user's natural language request
+    # into explicit edit operations.
+    for plan_key_id, plan_item in text_candidates:
+
+        try:
+            change_plan = _build_change_plan(
+                plan_item,
+                reference_path,
+                prompt.strip(),
+                template_data,
+            )
+
+            API_KEY_STATE[
+                "pipeline_key_id"
+            ] = plan_key_id
+
+            break
+
+        except Exception as exc:
+
+            planning_errors.append(
+                f"{plan_item.get('display_name', plan_key_id)} "
+                f"edit plan: {exc}"
+            )
+
+# ---------------------------------------------------------
+# 3. Safe fallback
+# ---------------------------------------------------------
+
+if not change_plan:
+
+    change_plan = {
+        "changes": [
+            {
+                "id": "user_request",
+                "target": "requested edit",
+                "action": "update",
+                "original_text": "",
+                "new_text": "",
+                "details": prompt.strip(),
+            }
+        ],
+        "visual_changes": [],
+        "global_instructions": [
+            prompt.strip()
+        ],
+        "must_preserve": [
+            "reference composition",
+            "reference layout",
+            "all content not explicitly changed",
+        ],
+    }
+
+# ---------------------------------------------------------
+# 4. Build strict final-image instruction
+# ---------------------------------------------------------
+
+instruction = _generation_instruction(
+    prompt,
+    template_json,
+    change_plan=change_plan,
+)
 
     selected_candidates = [
         (candidate_id, candidate_item)
@@ -3708,7 +4295,31 @@ async def generate_output_image(
             else "Generated-image fallback"
         ),
         "description_warning": " | ".join(description_errors) if description_errors else "",
-        "changes": {},
+        "changes": {
+    change.get(
+        "id",
+        f"change_{index}"
+    ): (
+        change.get("new_text")
+        if change.get("action") == "replace"
+        else (
+            "[removed]"
+            if change.get("action") == "remove"
+            else change.get("details", "")
+        )
+    )
+    for index, change in enumerate(
+        change_plan.get("changes", []),
+        start=1,
+    )
+    if isinstance(change, dict)
+},
+"change_plan": change_plan,
+"planning_warning": (
+    " | ".join(planning_errors)
+    if planning_errors
+    else ""
+),
     }
 
 @app.post("/api/social-media/generate")
