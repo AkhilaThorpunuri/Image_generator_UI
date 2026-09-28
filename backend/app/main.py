@@ -3194,31 +3194,74 @@ async def generate_social_media_description(
 
     errors = []
 
-    social_instruction = (
-        "Analyze the supplied generated image and create social-media content "
-        "for it.\n\n"
+    social_instruction = f"""
+Analyze the ACTUAL GENERATED IMAGE supplied with this request.
 
-        "Return EXACTLY these four sections:\n\n"
+Create social-media descriptions based on:
+1. What is visibly present in the generated image.
+2. The user's requested content/prompt.
 
-        "[LINKEDIN]\n"
-        "Write a professional LinkedIn post based on the visible image "
-        "and the user's content request. Keep it concise and professional.\n\n"
+The description must NOT be generic.
 
-        "[X / TWITTER]\n"
-        "Write a concise post suitable for X/Twitter. Keep it under 280 "
-        "characters when possible.\n\n"
+For every platform:
 
-        "[FACEBOOK]\n"
-        "Write an engaging Facebook post based on the visible image.\n\n"
+- Describe the actual subject/theme/scene visible in the image.
+- Include relevant emojis INSIDE the description paragraphs,
+  not only at the beginning or end.
+- Use emojis that are related to the actual image.
+- Do not use random decorative emojis.
+- Use different relevant emojis when appropriate.
+- Include relevant hashtags based on the image and topic.
+- Do not invent visual details that cannot reasonably be seen.
 
-        "[INSTAGRAM]\n"
-        "Write an engaging Instagram caption with relevant hashtags.\n\n"
+IMPORTANT WORD-COUNT REQUIREMENT:
 
-        "Do not invent facts that are not visible in the image.\n"
-        "Do not describe objects that cannot reasonably be seen.\n\n"
+Generate content CLOSE TO the target word count.
 
-        f"User's content request: {prompt.strip()}"
-    )
+LinkedIn:
+Target = 180 words
+Allowed = 165-195 words
+
+X / Twitter:
+Target = 35 words
+Maximum = 280 characters
+
+Facebook:
+Target = 160 words
+Allowed = 145-175 words
+
+Instagram:
+Target = 150 words
+Allowed = 135-165 words
+
+Do NOT intentionally produce short descriptions.
+
+The emojis must appear naturally in the middle of the
+description as well.
+
+For example, if the image is about AI:
+
+"Organizations are increasingly using artificial intelligence 🤖
+to transform how teams work and make decisions. Modern AI tools
+can help creators 💡 turn complex ideas into practical visual
+experiences..."
+
+Do NOT blindly use 🤖 or 💡.
+Choose emojis based on the actual generated image.
+
+Return structured descriptions containing:
+
+- text
+- icon
+- tags
+- word_count
+- target_word_count
+- minimum_word_count
+- maximum_word_count
+
+User prompt:
+{prompt}
+"""
 
     for key_id, pipeline_item in selected_candidates:
         try:
