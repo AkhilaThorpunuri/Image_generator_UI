@@ -17,13 +17,32 @@ class CanvaConnectService:
 
     API_BASE = "https://api.canva.com/rest/v1"
     AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
+    REDIRECT_URI = os.getenv(
+        "CANVA_CONNECT_REDIRECT_URI",
+        "http://127.0.0.1:8000/api/canva/connect/oauth/callback",
+    ).strip()
 
+    # These are the Connect permissions required by this application:
+    # read/write assets, create/read designs, and export the final design.
     SCOPES = [
+        "asset:read",
         "asset:write",
         "design:content:write",
         "design:content:read",
         "design:meta:read",
     ]
+
+    # Optional: ID of a Canva design that you created as the editable base
+    # template for generated posters. When set, the application copies that
+    # design and replaces its first editable image element with the newly
+    # generated image through Canva MCP.
+    #
+    # IMPORTANT:
+    # - This is a Canva DESIGN ID, not a public URL.
+    # - The copied design must contain at least one editable image element.
+    # - Text, shapes, and other elements already present in the template remain
+    #   real Canva elements and can be edited manually or through MCP.
+    EDITABLE_TEMPLATE_DESIGN_ID_ENV = "CANVA_EDITABLE_TEMPLATE_DESIGN_ID"
 
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
@@ -33,27 +52,15 @@ class CanvaConnectService:
 
     @property
     def client_id(self) -> str:
-        return os.getenv(
-            "CANVA_CONNECT_CLIENT_ID",
-            "",
-        ).strip()
+        return os.getenv("CANVA_CONNECT_CLIENT_ID", "").strip()
 
     @property
     def client_secret(self) -> str:
-        return os.getenv(
-            "CANVA_CONNECT_CLIENT_SECRET",
-            "",
-        ).strip()
+        return os.getenv("CANVA_CONNECT_CLIENT_SECRET", "").strip()
 
     @property
-    def redirect_uri(self) -> str:
-        return (
-            os.getenv(
-                "CANVA_CONNECT_REDIRECT_URI",
-                "",
-            ).strip()
-            or "http://127.0.0.1:8000/api/canva/connect/oauth/callback"
-        )
+    def editable_template_design_id(self) -> str:
+        return os.getenv(self.EDITABLE_TEMPLATE_DESIGN_ID_ENV, "").strip()
 
     def _require_credentials(self) -> None:
         if not self.client_id or not self.client_secret:
@@ -103,7 +110,7 @@ class CanvaConnectService:
                 "response_type": "code",
                 "client_id": self.client_id,
                 "state": state,
-                "redirect_uri": self.redirect_uri,
+                "redirect_uri": self.REDIRECT_URI,
             }
         )
         return f"{self.AUTHORIZE_URL}?{query}"
@@ -123,7 +130,7 @@ class CanvaConnectService:
             "grant_type": "authorization_code",
             "code_verifier": self._code_verifier,
             "code": code,
-            "redirect_uri": self.redirect_uri,
+            "redirect_uri": self.REDIRECT_URI,
         }
 
         async with httpx.AsyncClient(timeout=60) as client:
@@ -272,6 +279,142 @@ class CanvaConnectService:
 
         raise RuntimeError("Timed out waiting for Canva to finish uploading the image.")
 
+    async def import_generated_editable_template(self, local_path: Path) -> dict:
+        """Import an AI-generated editable PPTX template into Canva.
+
+        This uses Canva's normal Design Import API. It does not upload a PNG/JPG
+        for image-to-design conversion and therefore does not invoke Magic Layers.
+        """
+        path = Path(local_path)
+        if path.suffix.lower() != ".pptx":
+            raise RuntimeError("The generated editable Canva template must be a PPTX file.")
+        result = await self.import_design_from_local_file(path)
+        result["editable_source"] = "ai-generated-pptx-template"
+        result["magic_layers_required"] = False
+        return result
+
+    async def import_design_from_local_file(self, local_path: Path) -> dict:
+        """Import a local PDF/PPT/PPTX directly into Canva as a design.
+
+        Canva's Design Import API accepts PDF and Microsoft PowerPoint files as
+        binary uploads, so no public URL, Cloudflare tunnel, or ngrok is needed.
+        """
+        path = Path(local_path)
+        if not path.exists() or not path.is_file():
+            raise RuntimeError("The reference document was not found on the server.")
+
+        suffix = path.suffix.lower()
+        mime_types = {
+            ".pdf": "application/pdf",
+            ".ppt": "application/vnd.ms-powerpoint",
+            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+        mime_type = mime_types.get(suffix)
+        if not mime_type:
+            raise RuntimeError("Only PDF, PPT, and PPTX files can be imported into Canva.")
+
+        title = path.stem[:50] or "Imported reference"
+        title_base64 = base64.b64encode(title.encode("utf-8")).decode("ascii")
+        token = await self.access_token()
+
+        async with httpx.AsyncClient(timeout=180) as client:
+            response = await client.post(
+                f"{self.API_BASE}/imports",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/octet-stream",
+                    "Import-Metadata": json.dumps({
+                        "title_base64": title_base64,
+                        "mime_type": mime_type,
+                    }),
+                },
+                content=path.read_bytes(),
+            )
+
+        if response.status_code >= 400:
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text
+            raise RuntimeError(f"Canva document import failed: {detail}")
+
+        payload = response.json()
+        job = payload.get("job") or {}
+        job_id = str(job.get("id") or payload.get("id") or "").strip()
+        if not job_id:
+            raise RuntimeError(f"Canva did not return a design import job ID: {payload}")
+
+        for _ in range(120):
+            result = await self._request("GET", f"/imports/{job_id}")
+            current = result.get("job") or result
+            status = str(current.get("status") or "").lower()
+            if status == "success":
+                design = current.get("design") or result.get("design") or {}
+                design_id = str(design.get("id") or "").strip()
+                urls = design.get("urls") or {}
+                edit_url = str(urls.get("edit_url") or "").strip()
+                view_url = str(urls.get("view_url") or "").strip()
+                if design_id and not edit_url:
+                    edit_url = f"https://www.canva.com/design/{design_id}/edit"
+                if not design_id:
+                    raise RuntimeError(f"Canva import succeeded but returned no design ID: {result}")
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "design_id": design_id,
+                    "edit_url": edit_url,
+                    "view_url": view_url,
+                    "design": design,
+                    "source_file": path.name,
+                    "mime_type": mime_type,
+                }
+            if status == "failed":
+                error = current.get("error") or {}
+                raise RuntimeError(str(error.get("message") or current.get("message") or "Canva document import failed."))
+            await self._sleep(2)
+
+        raise RuntimeError("Timed out waiting for Canva to import the reference document.")
+
+    async def create_design_copy(
+        self,
+        source_design_id: str,
+        page_numbers: list[int] | None = None,
+    ) -> dict:
+        """Create a new Canva design by copying an existing editable design.
+
+        Canva currently exposes this creation mode as a preview feature.
+        The source design must be accessible by the authenticated Canva user.
+        """
+        source_design_id = str(source_design_id or "").strip()
+        if not source_design_id:
+            raise RuntimeError("A Canva editable template design ID is required.")
+
+        payload = {
+            "type": "design",
+            "design_id": source_design_id,
+        }
+        if page_numbers:
+            payload["page_numbers"] = [int(page) for page in page_numbers if int(page) > 0]
+
+        result = await self._request("POST", "/designs", json=payload)
+        design = result.get("design") or {}
+        design_id = str(design.get("id") or "").strip()
+        urls = design.get("urls") or {}
+        edit_url = str(urls.get("edit_url") or "").strip()
+        view_url = str(urls.get("view_url") or "").strip()
+
+        if design_id and not edit_url:
+            edit_url = f"https://www.canva.com/design/{design_id}/edit"
+        if not design_id:
+            raise RuntimeError(f"Canva copied the template but returned no design ID: {result}")
+
+        return {
+            "design_id": design_id,
+            "edit_url": edit_url,
+            "view_url": view_url,
+            "design": design,
+        }
+
     async def create_design_from_asset(self, asset_id: str, local_path: Path, title: str) -> dict:
         from PIL import Image
 
@@ -298,125 +441,129 @@ class CanvaConnectService:
         }
         return await self._request("POST", "/designs", json=payload)
 
-    async def import_design_from_local_file(self, local_path: Path) -> dict:
-        """Import a local structured design file into Canva.
-
-        This uses Canva's Design Import API with a direct binary upload.
-        It is intended for structured files such as PPTX/PPT/PDF and does
-        not use Canva's image-to-design/Magic Layers endpoint.
-        """
-        path = Path(local_path)
-        if not path.exists() or not path.is_file():
-            raise RuntimeError(f"Editable design file was not found: {path}")
-
-        suffix = path.suffix.lower()
-        mime_types = {
-            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ".ppt": "application/vnd.ms-powerpoint",
-            ".pdf": "application/pdf",
-        }
-        mime_type = mime_types.get(suffix)
-        if not mime_type:
-            raise RuntimeError(
-                "Canva editable design import supports PPTX, PPT, and PDF files."
-            )
-
-        # Canva's Design Import API requires the title to be Base64 encoded
-        # in the Import-Metadata header.
-        title = path.stem[:50] or "Generated Editable Design"
-        title_base64 = base64.b64encode(title.encode("utf-8")).decode("ascii")
-
-        token = await self.access_token()
-
-        async with httpx.AsyncClient(timeout=180) as client:
-            response = await client.post(
-                f"{self.API_BASE}/imports",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/octet-stream",
-                    "Import-Metadata": json.dumps(
-                        {
-                            "title_base64": title_base64,
-                            "mime_type": mime_type,
-                        }
-                    ),
-                },
-                content=path.read_bytes(),
-            )
-
-        if response.status_code >= 400:
-            try:
-                detail = response.json()
-            except Exception:
-                detail = response.text
-            raise RuntimeError(f"Canva design import failed: {detail}")
-
-        payload = response.json()
-        job = payload.get("job") or {}
-        import_job_id = str(job.get("id") or "")
-        if not import_job_id:
-            raise RuntimeError(
-                f"Canva design import did not return an import job ID: {payload}"
-            )
-
-        # Design imports are asynchronous. Poll until Canva returns success
-        # or failed. The documented result is job.result.designs[].
-        for _ in range(120):
-            result = await self._request(
-                "GET",
-                f"/imports/{import_job_id}",
-            )
-            current_job = result.get("job") or {}
-            status = str(current_job.get("status") or "").lower()
-
-            if status == "success":
-                designs = (
-                    (current_job.get("result") or {}).get("designs") or []
-                )
-                if not designs:
-                    raise RuntimeError(
-                        "Canva import succeeded but returned no designs."
-                    )
-
-                design = designs[0] or {}
-                design_id = str(design.get("id") or "")
-                urls = design.get("urls") or {}
-                edit_url = str(urls.get("edit_url") or "")
-                view_url = str(urls.get("view_url") or "")
-
-                if not design_id:
-                    raise RuntimeError(
-                        f"Canva import succeeded but returned no design ID: {result}"
-                    )
-
-                return {
-                    "success": True,
-                    "import_job_id": import_job_id,
-                    "design_id": design_id,
-                    "edit_url": edit_url,
-                    "view_url": view_url,
-                    "title": design.get("title") or title,
-                    "page_count": design.get("page_count"),
-                    "editable_source": "structured-design-import",
-                    "magic_layers_required": False,
-                    "job": current_job,
-                }
-
-            if status == "failed":
-                error = current_job.get("error") or {}
-                raise RuntimeError(
-                    str(error.get("message") or "Canva design import failed.")
-                )
-
-            await self._sleep(1)
-
-        raise RuntimeError(
-            f"Timed out waiting for Canva to import '{path.name}'."
-        )
-    async def create_editable_design_from_local_image(
+    async def _attach_asset_to_template_with_mcp(
         self,
-        local_path: Path,
+        design_id: str,
+        asset_id: str,
     ) -> dict:
+        """Replace the first editable image element in the copied template.
+
+        Canva MCP is used only after the private asset has been uploaded through
+        Canva Connect. No public URL is involved.
+        """
+        try:
+            # Local import avoids a module-level circular import between the
+            # Connect and MCP services.
+            from app.services.canva_mcp_service import canva_mcp_service
+        except Exception as exc:
+            raise RuntimeError(
+                "Canva MCP service could not be loaded. "
+                "Make sure canva_mcp_service.py exports canva_mcp_service."
+            ) from exc
+
+        start_result = await canva_mcp_service.call_tool(
+            "start-editing-transaction",
+            {"design_id": design_id},
+        )
+        payload = canva_mcp_service._extract_payload(start_result)
+
+        transaction_id = str(
+            canva_mcp_service._find_value(
+                payload,
+                {"transaction_id", "transactionId"},
+            )
+            or ""
+        ).strip()
+        if not transaction_id:
+            raise RuntimeError(
+                "Canva MCP did not return an editing transaction ID for the copied template."
+            )
+
+        # Find an editable image fill. start-editing-transaction is the source
+        # of truth for editable element IDs.
+        fills = []
+
+        def collect_fills(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if str(key).lower() == "fills" and isinstance(item, list):
+                        fills.extend(item)
+                    else:
+                        collect_fills(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_fills(item)
+
+        collect_fills(payload)
+
+        target = None
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            fill_type = str(fill.get("type") or "").lower()
+            element_id = str(fill.get("element_id") or "").strip()
+            editable = fill.get("editable", True)
+            if fill_type == "image" and element_id and editable is not False:
+                target = fill
+                break
+
+        if target is None:
+            try:
+                await canva_mcp_service.call_tool(
+                    "cancel-editing-transaction",
+                    {"transaction_id": transaction_id},
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "The Canva editable template does not contain an editable image "
+                "element. Add an image placeholder to the template and try again."
+            )
+
+        operation = {
+            "type": "update_fill",
+            "element_id": str(target["element_id"]),
+            "asset_id": asset_id,
+        }
+
+        page_index = target.get("page_index")
+        if page_index is not None:
+            operation["page_index"] = page_index
+
+        try:
+            perform_result = await canva_mcp_service.call_tool(
+                "perform-editing-operations",
+                {
+                    "transaction_id": transaction_id,
+                    "operations": [operation],
+                },
+            )
+            perform_payload = canva_mcp_service._extract_payload(perform_result)
+
+            # Do not leave the template in draft mode. The image replacement is
+            # part of the creation pipeline, so it is committed immediately.
+            commit_result = await canva_mcp_service.call_tool(
+                "commit-editing-transaction",
+                {"transaction_id": transaction_id},
+            )
+
+            return {
+                "transaction_id": transaction_id,
+                "target_element_id": str(target["element_id"]),
+                "perform_result": perform_payload,
+                "commit_result": canva_mcp_service._extract_payload(commit_result),
+            }
+        except Exception:
+            try:
+                await canva_mcp_service.call_tool(
+                    "cancel-editing-transaction",
+                    {"transaction_id": transaction_id},
+                )
+            except Exception:
+                pass
+            raise
+
+    async def create_editable_design_from_local_image(self, local_path: Path) -> dict:
         """Create a Canva design from a local generated image.
 
         Preferred mode:
@@ -427,35 +574,32 @@ class CanvaConnectService:
           4. Commit the change.
           5. Return the Canva edit URL.
 
-        Fallback mode:
+        This produces a genuinely editable Canva design for the template's
+        text/shapes/images. The generated PNG itself remains an image element;
+        Canva's Connect API does not expose a general REST endpoint that
+        decomposes arbitrary PNG pixels into native text/shape elements.
+
+        Fallback mode (when no template ID is configured):
           - Upload the local image directly.
-          - Create a Canva design containing that image as one raster element.
+          - Create a custom Canva design containing that image as one raster
+            element. It remains editable as an image, but text inside the PNG
+            is not separate Canva text.
         """
         path = Path(local_path)
-
         if not path.exists() or not path.is_file():
-            raise RuntimeError(
-                "Generated image was not found on the server."
-            )
+            raise RuntimeError("Generated image was not found on the server.")
 
         asset_id = await self.upload_asset(path)
 
         template_id = self.editable_template_design_id
-
         if template_id:
             copied = await self.create_design_copy(
                 template_id,
                 page_numbers=[1],
             )
-
-            design_id = str(
-                copied.get("design_id") or ""
-            ).strip()
-
+            design_id = str(copied.get("design_id") or "").strip()
             if not design_id:
-                raise RuntimeError(
-                    "Canva copied the editable template but returned no design ID."
-                )
+                raise RuntimeError("Canva copied the editable template but returned no design ID.")
 
             try:
                 mcp_sync = await self._attach_asset_to_template_with_mcp(
@@ -471,28 +615,20 @@ class CanvaConnectService:
             return {
                 "success": True,
                 "design_id": design_id,
-                "edit_url": str(
-                    copied.get("edit_url") or ""
-                ),
-                "view_url": str(
-                    copied.get("view_url") or ""
-                ),
+                "edit_url": str(copied.get("edit_url") or ""),
+                "view_url": str(copied.get("view_url") or ""),
                 "asset_id": asset_id,
                 "template_design_id": template_id,
-                "title": (
-                    copied.get("design", {}).get("title")
-                    or path.stem
-                ),
-                "editable_scope": (
-                    "template-elements-plus-generated-image-element"
-                ),
+                "title": copied.get("design", {}).get("title") or path.stem,
+                "editable_scope": "template-elements-plus-generated-image-element",
                 "canva_ai_ready": True,
                 "public_tunnel_required": False,
                 "message": (
                     "An editable Canva design was created from your template. "
                     "The generated image was inserted into the template's editable "
                     "image element. Existing Canva text, shapes, and other template "
-                    "elements remain independently editable."
+                    "elements remain independently editable, and Canva MCP AI edits "
+                    "can be applied to those elements."
                 ),
                 "mcp_sync": mcp_sync,
             }
@@ -503,21 +639,13 @@ class CanvaConnectService:
             path,
             path.stem,
         )
-
         design = result.get("design") or {}
         urls = design.get("urls") or {}
-
         return {
             "success": True,
-            "design_id": str(
-                design.get("id") or ""
-            ),
-            "edit_url": str(
-                urls.get("edit_url") or ""
-            ),
-            "view_url": str(
-                urls.get("view_url") or ""
-            ),
+            "design_id": str(design.get("id") or ""),
+            "edit_url": str(urls.get("edit_url") or ""),
+            "view_url": str(urls.get("view_url") or ""),
             "asset_id": asset_id,
             "title": design.get("title") or path.stem,
             "editable_scope": "raster-image-element",
@@ -530,122 +658,54 @@ class CanvaConnectService:
                 "that contains editable placeholders."
             ),
         }
-        """Create an editable Canva design from the generated image."""
 
-        asset_id = await self.upload_asset(local_path)
-
-        result = await self.create_design_from_asset(
-            asset_id,
-            local_path,
-            Path(local_path).stem,
-        )
-
-        design = result.get("design") or {}
-        urls = design.get("urls") or {}
-
+    def editable_design_mode(self) -> dict:
+        """Return the currently configured Canva creation mode."""
+        template_id = self.editable_template_design_id
         return {
-            "success": True,
-            "design_id": str(
-                design.get("id") or ""
-            ),
-            "edit_url": str(
-                urls.get("edit_url") or ""
-            ),
-            "view_url": str(
-                urls.get("view_url") or ""
-            ),
-            "asset_id": asset_id,
-            "title": (
-                design.get("title")
-                or Path(local_path).stem
-            ),
+            "mode": "editable-template" if template_id else "raster-image",
+            "template_configured": bool(template_id),
+            "template_design_id": template_id or None,
+            "public_tunnel_required": False,
         }
 
-    job = result.get("job") or {}
-    job_id = str(job.get("id") or "")
+    async def export_design(self, design_id: str, file_format: str = "png") -> bytes:
+        """Export a Canva design as PNG, PDF, or PPTX."""
+        normalized = str(file_format or "png").strip().lower()
+        if normalized not in {"png", "pdf", "pptx"}:
+            raise RuntimeError("Supported Canva export formats are PNG, PDF, and PPTX.")
 
-    if not job_id:
-        raise RuntimeError(
-            "Canva did not return an image-to-design import job ID."
-        )
-
-    # Poll until Canva finishes creating the editable design.
-    for _ in range(90):
         result = await self._request(
-            "GET",
-            f"/image-to-design-imports/{job_id}",
+            "POST",
+            "/exports",
+            json={"design_id": design_id, "format": {"type": normalized}},
         )
-
         job = result.get("job") or {}
-        status = str(job.get("status") or "").lower()
+        export_id = str(job.get("id") or "")
+        if not export_id:
+            raise RuntimeError("Canva did not return an export job ID.")
 
-        if status == "success":
-            design = (
-                (job.get("result") or {})
-                .get("design")
-                or {}
-            )
+        for _ in range(90):
+            result = await self._request("GET", f"/exports/{export_id}")
+            job = result.get("job") or {}
+            status = str(job.get("status") or "")
+            if status == "success":
+                urls = job.get("urls") or []
+                if not urls:
+                    raise RuntimeError("Canva export succeeded but returned no download URL.")
+                async with httpx.AsyncClient(timeout=180) as client:
+                    response = await client.get(str(urls[0]))
+                    response.raise_for_status()
+                    return response.content
+            if status == "failed":
+                error = job.get("error") or {}
+                raise RuntimeError(str(error.get("message") or "Canva export failed."))
+            await self._sleep(2)
 
-            urls = design.get("urls") or {}
+        raise RuntimeError("Timed out waiting for Canva to finish exporting the design.")
 
-            edit_url = str(
-                urls.get("edit_url") or ""
-            )
-
-            design_id = str(
-                design.get("id") or ""
-            )
-
-            if not edit_url or not design_id:
-                raise RuntimeError(
-                    "Canva completed the import but did not return an edit URL."
-                )
-
-            return {
-                "success": True,
-                "design_id": design_id,
-                "edit_url": edit_url,
-                "view_url": str(
-                    urls.get("view_url") or ""
-                ),
-                "asset_id": asset_id,
-                "title": design.get("title")
-                or Path(local_path).stem,
-            }
-
-        if status == "failed":
-            error = job.get("error") or {}
-
-            raise RuntimeError(
-                str(
-                    error.get("message")
-                    or "Canva image-to-design import failed."
-                )
-            )
-
-        await self._sleep(2)
-
-    raise RuntimeError(
-        "Timed out waiting for Canva to create the editable design."
-    )
-        asset_id = await self.upload_asset(local_path)
-        result = await self.create_design_from_asset(
-            asset_id,
-            local_path,
-            Path(local_path).stem,
-        )
-        design = result.get("design") or {}
-        urls = design.get("urls") or {}
-        return {
-            "success": True,
-            "design_id": str(design.get("id") or ""),
-            "edit_url": str(urls.get("edit_url") or ""),
-            "view_url": str(urls.get("view_url") or ""),
-            "asset_id": asset_id,
-            "title": design.get("title") or Path(local_path).stem,
-        }
-
-   
+    async def export_design_png(self, design_id: str) -> bytes:
+        return await self.export_design(design_id, "png")
 
     @staticmethod
     async def _sleep(seconds: float) -> None:
