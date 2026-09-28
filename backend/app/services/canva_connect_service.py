@@ -645,37 +645,7 @@ class CanvaConnectService:
             "title": design.get("title") or Path(local_path).stem,
         }
 
-    async def export_design_png(self, design_id: str) -> bytes:
-        payload = {
-            "design_id": design_id,
-            "format": {
-                "type": "png",
-            },
-        }
-        result = await self._request("POST", "/exports", json=payload)
-        job = result.get("job") or {}
-        export_id = str(job.get("id") or "")
-        if not export_id:
-            raise RuntimeError("Canva did not return an export job ID.")
-
-        for _ in range(90):
-            result = await self._request("GET", f"/exports/{export_id}")
-            job = result.get("job") or {}
-            status = str(job.get("status") or "")
-            if status == "success":
-                urls = job.get("urls") or []
-                if not urls:
-                    raise RuntimeError("Canva export succeeded but returned no download URL.")
-                async with httpx.AsyncClient(timeout=180) as client:
-                    response = await client.get(str(urls[0]))
-                    response.raise_for_status()
-                    return response.content
-            if status == "failed":
-                error = job.get("error") or {}
-                raise RuntimeError(str(error.get("message") or "Canva export failed."))
-            await self._sleep(2)
-
-        raise RuntimeError("Timed out waiting for Canva to finish exporting the design.")
+   
 
     @staticmethod
     async def _sleep(seconds: float) -> None:
