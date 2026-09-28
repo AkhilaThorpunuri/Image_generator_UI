@@ -27,7 +27,12 @@ class CanvaConnectService:
 
     API_BASE = "https://api.canva.com/rest/v1"
     AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
-    REDIRECT_URI = "http://127.0.0.1:8000/api/canva/connect/oauth/callback"
+    @property
+def redirect_uri(self) -> str:
+    return (
+        os.getenv("CANVA_CONNECT_REDIRECT_URI", "").strip()
+        or "http://127.0.0.1:8000/api/canva/connect/oauth/callback"
+    )
 
     # These are the Connect permissions required by this application:
     # upload the generated image, create the design, and export the final design.
@@ -107,7 +112,7 @@ class CanvaConnectService:
                 "response_type": "code",
                 "client_id": self.client_id,
                 "state": state,
-                "redirect_uri": self.REDIRECT_URI,
+                "redirect_uri": self.redirect_uri,
             }
         )
         return f"{self.AUTHORIZE_URL}?{query}"
@@ -127,7 +132,7 @@ class CanvaConnectService:
             "grant_type": "authorization_code",
             "code_verifier": self._code_verifier,
             "code": code,
-            "redirect_uri": self.REDIRECT_URI,
+            "redirect_uri": self.redirect_uri,
         }
 
         async with httpx.AsyncClient(timeout=60) as client:
@@ -418,7 +423,96 @@ class CanvaConnectService:
             f"Timed out waiting for Canva to import '{path.name}'."
         )
 
-    async def create_editable_design_from_local_image(self, local_path: Path) -> dict:
+    async def create_editable_design_from_local_image(
+    self,
+    local_path: Path,
+) -> dict:
+    """
+    Upload the generated image to Canva and convert it into a
+    Canva design with separately editable layers.
+    """
+
+    asset_id = await self.upload_asset(local_path)
+
+    # Start Canva's Image-to-Design import job.
+    result = await self._request(
+        "POST",
+        "/image-to-design-imports",
+        json={
+            "image": {
+                "asset_id": asset_id,
+            },
+            "title": Path(local_path).stem[:255],
+        },
+    )
+
+    job = result.get("job") or {}
+    job_id = str(job.get("id") or "")
+
+    if not job_id:
+        raise RuntimeError(
+            "Canva did not return an image-to-design import job ID."
+        )
+
+    # Poll until Canva finishes creating the editable design.
+    for _ in range(90):
+        result = await self._request(
+            "GET",
+            f"/image-to-design-imports/{job_id}",
+        )
+
+        job = result.get("job") or {}
+        status = str(job.get("status") or "").lower()
+
+        if status == "success":
+            design = (
+                (job.get("result") or {})
+                .get("design")
+                or {}
+            )
+
+            urls = design.get("urls") or {}
+
+            edit_url = str(
+                urls.get("edit_url") or ""
+            )
+
+            design_id = str(
+                design.get("id") or ""
+            )
+
+            if not edit_url or not design_id:
+                raise RuntimeError(
+                    "Canva completed the import but did not return an edit URL."
+                )
+
+            return {
+                "success": True,
+                "design_id": design_id,
+                "edit_url": edit_url,
+                "view_url": str(
+                    urls.get("view_url") or ""
+                ),
+                "asset_id": asset_id,
+                "title": design.get("title")
+                or Path(local_path).stem,
+            }
+
+        if status == "failed":
+            error = job.get("error") or {}
+
+            raise RuntimeError(
+                str(
+                    error.get("message")
+                    or "Canva image-to-design import failed."
+                )
+            )
+
+        await self._sleep(2)
+
+    raise RuntimeError(
+        "Timed out waiting for Canva to create the editable design."
+    )
         asset_id = await self.upload_asset(local_path)
         result = await self.create_design_from_asset(
             asset_id,
