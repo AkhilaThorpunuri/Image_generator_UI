@@ -6067,70 +6067,7 @@ const handleOpenGeneratedImageInCanva = async () => {
                 />
 
               </div>
-              <div
-  style={{
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-    marginTop: "16px",
-  }}
->
-  <button
-    type="button"
-    className="secondary-button"
-    onClick={handleOpenGeneratedImageInCanva}
-    disabled={isCreatingCanvaDesign}
-  >
-    {isCreatingCanvaDesign
-      ? "Opening Canva..."
-      : "Open / Edit in Canva"}
-  </button>
-</div>
 
-{canvaMessage && (
-  <div
-    style={{
-      marginTop: "10px",
-      padding: "10px 12px",
-      borderRadius: "10px",
-      border:
-        "1px solid rgba(120, 100, 255, 0.25)",
-      background:
-        "rgba(120, 100, 255, 0.07)",
-    }}
-  >
-    <p style={{ margin: 0 }}>
-      {canvaMessage}
-    </p>
-
-    {canvaEditUrl && (
-      <a
-        href={canvaEditUrl}
-        target="_blank"
-        rel="noreferrer"
-        style={{
-          display: "inline-block",
-          marginTop: "7px",
-          fontWeight: 700,
-        }}
-      >
-        Reopen editable Canva design
-      </a>
-    )}
-
-    {canvaDesignId && (
-      <small
-        style={{
-          display: "block",
-          marginTop: "5px",
-          opacity: 0.65,
-        }}
-      >
-        Canva design: {canvaDesignId}
-      </small>
-    )}
-  </div>
-)}
 
 
               <div className="generated-output-details">
@@ -6284,6 +6221,75 @@ const handleOpenGeneratedImageInCanva = async () => {
         Reopen editable Canva design
       </a>
     )}
+    {canvaDesignId && (
+      <small
+        style={{
+          display: "block",
+          marginTop: "5px",
+          opacity: 0.65,
+        }}
+      >
+        Canva design: {canvaDesignId}
+      </small>
+    )}
+  </div>
+)}
+<div
+  style={{
+    display: "flex",
+    gap: "10px",
+    flexWrap: "wrap",
+    width: "100%",
+    marginTop: "12px",
+  }}
+>
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={handleOpenGeneratedImageInCanva}
+    disabled={
+      !generatedImageFilename ||
+      isCreatingCanvaDesign
+    }
+  >
+    {isCreatingCanvaDesign
+      ? "Opening Canva..."
+      : "Open / Edit in Canva"}
+  </button>
+</div>
+
+{canvaMessage && (
+  <div
+    style={{
+      width: "100%",
+      marginTop: "10px",
+      padding: "10px 12px",
+      borderRadius: "10px",
+      border:
+        "1px solid rgba(120, 100, 255, 0.25)",
+      background:
+        "rgba(120, 100, 255, 0.07)",
+    }}
+  >
+    <p style={{ margin: 0 }}>
+      {canvaMessage}
+    </p>
+
+    {canvaEditUrl && (
+      <a
+        href={canvaEditUrl}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          display: "inline-block",
+          marginTop: "7px",
+          fontWeight: 700,
+        }}
+      >
+        Reopen editable Canva design
+      </a>
+    )}
+
     {canvaDesignId && (
       <small
         style={{
