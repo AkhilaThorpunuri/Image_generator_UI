@@ -4,8 +4,12 @@ import json
 import base64
 import os
 import re
-from urllib.parse import quote
+import secrets
+import hashlib
+import time
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 from fastapi import (
     FastAPI,
@@ -24,6 +28,7 @@ from pydantic import BaseModel
 from fastapi.responses import (
     FileResponse,
     StreamingResponse,
+    RedirectResponse,
 )
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -147,6 +152,30 @@ API_KEY_STATE = {
     "drive_output_folder_id": "",
     "drive_output_folder_name": "outputs",
     "gemini_model": "gemini-3.5-flash-lite",
+}
+
+
+# -------------------------------------------------------------------
+# Canva Connect REST API / OAuth state
+# -------------------------------------------------------------------
+# The Canva access/refresh tokens are kept server-side only. Never send
+# the Canva client secret or access token to the browser.
+CANVA_API_BASE_URL = "https://api.canva.com/rest/v1"
+CANVA_AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
+CANVA_TOKEN_URL = f"{CANVA_API_BASE_URL}/oauth/token"
+CANVA_CLIENT_ID_ENV = "CANVA_CONNECT_CLIENT_ID"
+CANVA_CLIENT_SECRET_ENV = "CANVA_CONNECT_CLIENT_SECRET"
+CANVA_REDIRECT_URI_ENV = "CANVA_CONNECT_REDIRECT_URI"
+CANVA_FRONTEND_URL_ENV = "CANVA_FRONTEND_URL"
+CANVA_SCOPES = "asset:write design:content:write"
+
+CANVA_STATE = {
+    "access_token": "",
+    "refresh_token": "",
+    "expires_at": 0.0,
+    "oauth_state": "",
+    "code_verifier": "",
+    "oauth_filename": "",
 }
 
 
@@ -3815,6 +3844,425 @@ async def generate_social_media_description(
             "using fallback text."
         ),
     }
+# -------------------------------------------------------------------
+# Canva Connect integration
+# -------------------------------------------------------------------
+
+def _canva_client_id() -> str:
+    return str(os.getenv(CANVA_CLIENT_ID_ENV, "") or "").strip()
+
+
+def _canva_client_secret() -> str:
+    return str(os.getenv(CANVA_CLIENT_SECRET_ENV, "") or "").strip()
+
+
+def _canva_redirect_uri() -> str:
+    configured = str(os.getenv(CANVA_REDIRECT_URI_ENV, "") or "").strip()
+    if configured:
+        return configured
+    return "http://localhost:8000/api/canva/connect/oauth/callback"
+
+
+def _canva_frontend_url() -> str:
+    configured = str(os.getenv(CANVA_FRONTEND_URL_ENV, "") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return "http://localhost:5173"
+
+
+def _canva_configured() -> bool:
+    return bool(_canva_client_id() and _canva_client_secret())
+
+
+def _canva_json_request(
+    method: str,
+    endpoint: str,
+    access_token: str,
+    payload: dict | None = None,
+    raw_body: bytes | None = None,
+    headers: dict | None = None,
+    timeout: int = 120,
+) -> dict:
+    """Call a Canva REST endpoint and return JSON, with one token refresh retry."""
+    body = raw_body
+    request_headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+    if headers:
+        request_headers.update(headers)
+
+    request = Request(
+        f"{CANVA_API_BASE_URL}/{endpoint.lstrip('/')}",
+        data=body,
+        method=method.upper(),
+        headers=request_headers,
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else {}
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Canva API request failed ({exc.code}): {detail}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Canva API request failed: {exc}") from exc
+
+
+def _canva_refresh_access_token() -> str:
+    refresh_token = str(CANVA_STATE.get("refresh_token", "") or "").strip()
+    client_id = _canva_client_id()
+    client_secret = _canva_client_secret()
+    if not refresh_token or not client_id or not client_secret:
+        raise RuntimeError("Canva authorization is missing or expired. Connect Canva again.")
+
+    import urllib.parse
+    credentials = base64.b64encode(
+        f"{client_id}:{client_secret}".encode("utf-8")
+    ).decode("ascii")
+    body = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }).encode("utf-8")
+    request = Request(
+        CANVA_TOKEN_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            token_data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        CANVA_STATE["access_token"] = ""
+        CANVA_STATE["refresh_token"] = ""
+        CANVA_STATE["expires_at"] = 0.0
+        raise RuntimeError(f"Canva token refresh failed ({exc.code}): {detail}") from exc
+
+    access_token = str(token_data.get("access_token", "") or "").strip()
+    if not access_token:
+        raise RuntimeError("Canva did not return a refreshed access token.")
+
+    new_refresh = str(token_data.get("refresh_token", "") or "").strip()
+    CANVA_STATE["access_token"] = access_token
+    if new_refresh:
+        CANVA_STATE["refresh_token"] = new_refresh
+    CANVA_STATE["expires_at"] = time.time() + float(token_data.get("expires_in", 14400) or 14400)
+    return access_token
+
+
+def _canva_access_token() -> str:
+    token = str(CANVA_STATE.get("access_token", "") or "").strip()
+    expires_at = float(CANVA_STATE.get("expires_at", 0) or 0)
+    if token and time.time() < expires_at - 60:
+        return token
+    if CANVA_STATE.get("refresh_token"):
+        return _canva_refresh_access_token()
+    if token:
+        return token
+    raise RuntimeError("Canva is not connected. Connect Canva before editing an image.")
+
+
+def _canva_request_with_refresh(
+    method: str,
+    endpoint: str,
+    payload: dict | None = None,
+    raw_body: bytes | None = None,
+    headers: dict | None = None,
+    timeout: int = 120,
+) -> dict:
+    token = _canva_access_token()
+    try:
+        return _canva_json_request(
+            method, endpoint, token, payload, raw_body, headers, timeout
+        )
+    except RuntimeError as exc:
+        # If Canva rejected an otherwise valid token, refresh once and retry.
+        if "401" not in str(exc):
+            raise
+        token = _canva_refresh_access_token()
+        return _canva_json_request(
+            method, endpoint, token, payload, raw_body, headers, timeout
+        )
+
+
+def _canva_upload_asset(image_path: Path) -> str:
+    """Upload the generated image to the connected user's Canva library."""
+    image_bytes = image_path.read_bytes()
+    if len(image_bytes) >= 50 * 1024 * 1024:
+        raise RuntimeError("The generated image is larger than Canva's 50 MB image limit.")
+
+    safe_name = image_path.stem[:40] or "Generated Image"
+    name_b64 = base64.b64encode(safe_name.encode("utf-8")).decode("ascii")
+    mime = get_mime_type(image_path) or "image/png"
+
+    result = _canva_request_with_refresh(
+        "POST",
+        "asset-uploads",
+        raw_body=image_bytes,
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Asset-Upload-Metadata": json.dumps({"name_base64": name_b64}),
+        },
+        timeout=120,
+    )
+    job = result.get("job") or {}
+    job_id = str(job.get("id", "") or "").strip()
+    if not job_id:
+        raise RuntimeError(f"Canva did not return an asset upload job ID: {result}")
+
+    # Asset uploads are asynchronous. Poll until Canva returns the asset ID.
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        status_result = _canva_request_with_refresh(
+            "GET", f"asset-uploads/{quote(job_id, safe='')}", timeout=60
+        )
+        status_job = status_result.get("job") or {}
+        status = str(status_job.get("status", "") or "").lower()
+        if status == "success":
+            asset_id = str((status_job.get("asset") or {}).get("id", "") or "").strip()
+            if asset_id:
+                return asset_id
+            raise RuntimeError("Canva completed the upload but did not return an asset ID.")
+        if status == "failed":
+            error = status_job.get("error") or {}
+            raise RuntimeError(
+                f"Canva could not upload the generated image: "
+                f"{error.get('message') or 'asset upload failed'}"
+            )
+        time.sleep(0.75)
+
+    raise RuntimeError("Timed out while uploading the generated image to Canva.")
+
+
+def _create_canva_design_from_image(image_path: Path, design_type: str = "poster") -> dict:
+    """Create a Canva design containing the generated image as one flat image element."""
+    asset_id = _canva_upload_asset(image_path)
+
+    # Preserve the generated image's aspect ratio by using its actual dimensions.
+    try:
+        from PIL import Image
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception:
+        width, height = 1200, 1200
+
+    # Canva custom designs allow dimensions from 40..8000 px and max area 25M px².
+    width = max(40, min(8000, int(width)))
+    height = max(40, min(8000, int(height)))
+    if width * height > 25_000_000:
+        scale = (25_000_000 / float(width * height)) ** 0.5
+        width = max(40, int(width * scale))
+        height = max(40, int(height * scale))
+
+    title = image_path.stem[:80] or "Generated Image"
+    payload = {
+        "type": "type_and_asset",
+        "design_type": {
+            "type": "custom",
+            "width": width,
+            "height": height,
+        },
+        "asset_id": asset_id,
+        "title": title,
+    }
+    result = _canva_request_with_refresh(
+        "POST", "designs", payload=payload, timeout=120
+    )
+    design = result.get("design") or {}
+    design_id = str(design.get("id", "") or "").strip()
+    edit_url = str(design.get("urls", {}).get("edit_url", "") or "").strip()
+    if not design_id or not edit_url:
+        raise RuntimeError(f"Canva did not return an editable design URL: {result}")
+
+    return {
+        "design_id": design_id,
+        "edit_url": edit_url,
+        "asset_id": asset_id,
+        "width": width,
+        "height": height,
+    }
+
+
+@app.get("/api/canva/connect/oauth/status")
+def canva_oauth_status():
+    configured = _canva_configured()
+    authenticated = bool(
+        CANVA_STATE.get("access_token")
+        or CANVA_STATE.get("refresh_token")
+    )
+    if authenticated and CANVA_STATE.get("refresh_token"):
+        try:
+            _canva_access_token()
+            authenticated = bool(CANVA_STATE.get("access_token"))
+        except Exception:
+            authenticated = False
+
+    return {
+        "configured": configured,
+        "authenticated": authenticated,
+        "scopes": CANVA_SCOPES.split(),
+    }
+
+
+@app.get("/api/canva/connect/oauth/start")
+def canva_oauth_start(filename: str = ""):
+    if not _canva_configured():
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID "
+                "and CANVA_CONNECT_CLIENT_SECRET in the backend environment."
+            ),
+        )
+
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+    oauth_state = secrets.token_urlsafe(48)
+
+    CANVA_STATE["oauth_state"] = oauth_state
+    CANVA_STATE["code_verifier"] = code_verifier
+    CANVA_STATE["oauth_filename"] = Path(filename).name if filename else ""
+
+    query = urlencode({
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "scope": CANVA_SCOPES,
+        "response_type": "code",
+        "client_id": _canva_client_id(),
+        "state": oauth_state,
+        "redirect_uri": _canva_redirect_uri(),
+    })
+    return {"authorization_url": f"{CANVA_AUTHORIZE_URL}?{query}"}
+
+
+@app.get("/api/canva/connect/oauth/callback")
+def canva_oauth_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        raise HTTPException(status_code=400, detail=f"Canva authorization failed: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Canva did not return an authorization code.")
+    if not state or state != CANVA_STATE.get("oauth_state"):
+        raise HTTPException(status_code=400, detail="Invalid Canva OAuth state.")
+
+    client_id = _canva_client_id()
+    client_secret = _canva_client_secret()
+    code_verifier = str(CANVA_STATE.get("code_verifier", "") or "")
+    if not code_verifier:
+        raise HTTPException(status_code=400, detail="Canva OAuth verifier is missing. Start authorization again.")
+
+    credentials = base64.b64encode(
+        f"{client_id}:{client_secret}".encode("utf-8")
+    ).decode("ascii")
+    body = urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "code_verifier": code_verifier,
+        "redirect_uri": _canva_redirect_uri(),
+    }).encode("utf-8")
+    request = Request(
+        CANVA_TOKEN_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=60) as response:
+            token_data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=400, detail=f"Canva token exchange failed: {detail}") from exc
+
+    access_token = str(token_data.get("access_token", "") or "").strip()
+    refresh_token = str(token_data.get("refresh_token", "") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Canva token exchange returned no access token.")
+
+    CANVA_STATE["access_token"] = access_token
+    CANVA_STATE["refresh_token"] = refresh_token
+    CANVA_STATE["expires_at"] = time.time() + float(token_data.get("expires_in", 14400) or 14400)
+    CANVA_STATE["oauth_state"] = ""
+    CANVA_STATE["code_verifier"] = ""
+
+    # If the user clicked Edit in Canva before connecting Canva, continue the
+    # original action automatically after OAuth instead of making them click
+    # the button a second time.
+    pending_filename = Path(str(CANVA_STATE.get("oauth_filename", "") or "")).name
+    CANVA_STATE["oauth_filename"] = ""
+    if pending_filename:
+        pending_path = IMAGE_OUTPUT_DIR / pending_filename
+        if pending_path.exists() and is_valid_image_file(pending_path):
+            try:
+                created = _create_canva_design_from_image(pending_path, "poster")
+                return RedirectResponse(url=created["edit_url"])
+            except Exception as exc:
+                # Authentication succeeded, but design creation failed. Return
+                # to the app with a visible message so the user can retry.
+                error_text = quote(str(exc)[:500], safe="")
+                return RedirectResponse(
+                    url=f"{_canva_frontend_url()}/image-generator?canva=error&message={error_text}"
+                )
+
+    return RedirectResponse(
+        url=f"{_canva_frontend_url()}/image-generator?canva=connected"
+    )
+
+
+@app.post("/api/canva/create-from-generated-image")
+def canva_create_from_generated_image(
+    filename: str = Form(...),
+    design_type: str = Form("poster"),
+):
+    """Upload the generated image to Canva and create a design containing it as one flat image."""
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Generated image filename is required.")
+
+    image_path = IMAGE_OUTPUT_DIR / safe_name
+    if not image_path.exists() or not image_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="The generated image was not found on the backend. Generate the image again before opening Canva.",
+        )
+    if not is_valid_image_file(image_path):
+        raise HTTPException(status_code=400, detail="The generated output is not a readable image.")
+    if not _canva_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET.",
+        )
+
+    try:
+        created = _create_canva_design_from_image(image_path, design_type)
+    except Exception as exc:
+        message = str(exc)
+        if "not connected" in message.lower() or "authorization" in message.lower():
+            raise HTTPException(status_code=401, detail=message) from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+
+    return {
+        "success": True,
+        "design_id": created["design_id"],
+        "edit_url": created["edit_url"],
+        "asset_id": created["asset_id"],
+        "message": "The generated image was added to a new Canva design as one editable image.",
+    }
+
+
 @app.get("/api/images/output/{filename}")
 def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
