@@ -1471,8 +1471,8 @@ function ImageGenerator({
       null,
     );
 
-  const [templateApiProvider, setTemplateApiProvider] = useState<string>("");
-const [templateApiModel, setTemplateApiModel] = useState<string>("");
+  const [, setTemplateApiProvider] = useState<string>("");
+const [, setTemplateApiModel] = useState<string>("");
 
   const [promptApiProvider] =
     useState("");
