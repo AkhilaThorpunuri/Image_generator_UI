@@ -187,67 +187,69 @@ def persist_drive_configuration() -> None:
 
 def load_persisted_drive_configuration() -> None:
     """
-    Restore the non-secret Drive folder configuration at backend startup.
+    Restore the non-secret Google Drive configuration.
 
-    This is intentionally independent of the API-key selection state.
-    Google Drive authentication continues to use credentials.json/token.json.
+    Railway environment variables are authoritative when present. This is
+    important for GOOGLE_DRIVE_OUTPUT_FOLDER_ID: a persisted local
+    drive_config.json must never silently replace the folder ID configured for
+    the deployed service.
     """
-    if not DRIVE_CONFIG_FILE.exists():
-        # Railway provides non-secret Drive folder configuration as service
-        # variables. Keep drive_config.json authoritative when it exists, but
-        # use these variables on a fresh deployment.
-        env_folder_id = normalize_drive_folder_id(
-            str(os.getenv(DRIVE_FOLDER_ENV, "") or "")
-        )
-        env_output_folder_id = str(
-            os.getenv(DRIVE_OUTPUT_FOLDER_ENV, "") or ""
-        ).strip()
-        if env_folder_id:
-            API_KEY_STATE["drive_folder_id"] = env_folder_id
-        if env_output_folder_id:
-            API_KEY_STATE["drive_output_folder_id"] = env_output_folder_id
-        if env_folder_id or env_output_folder_id:
-            API_KEY_STATE["drive_output_folder_name"] = "outputs"
-            print("Loaded Google Drive folder configuration from environment.")
-        return
+    env_folder_id = normalize_drive_folder_id(
+        str(os.getenv(DRIVE_FOLDER_ENV, "") or "")
+    )
+    env_output_folder_id = normalize_drive_folder_id(
+        str(os.getenv(DRIVE_OUTPUT_FOLDER_ENV, "") or "")
+    )
 
-    try:
-        payload = json.loads(
-            DRIVE_CONFIG_FILE.read_text(encoding="utf-8")
-        )
+    payload = None
+    if DRIVE_CONFIG_FILE.exists():
+        try:
+            loaded = json.loads(
+                DRIVE_CONFIG_FILE.read_text(encoding="utf-8")
+            )
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(
+                "Unable to restore Google Drive configuration:",
+                repr(exc),
+            )
 
-        if not isinstance(payload, dict):
-            return
-
+    if payload is not None:
         folder_id = normalize_drive_folder_id(
             str(payload.get("drive_folder_id", "") or "")
         )
         folder_name = str(
             payload.get("drive_folder_name", "") or ""
         ).strip()
+        persisted_output_id = normalize_drive_folder_id(
+            str(payload.get("drive_output_folder_id", "") or "")
+        )
+        persisted_output_name = str(
+            payload.get("drive_output_folder_name", "outputs") or "outputs"
+        ).strip() or "outputs"
 
         if folder_id or folder_name:
             API_KEY_STATE["drive_folder_id"] = folder_id
             API_KEY_STATE["drive_folder_name"] = folder_name
+        if persisted_output_id:
+            API_KEY_STATE["drive_output_folder_id"] = persisted_output_id
+        API_KEY_STATE["drive_output_folder_name"] = persisted_output_name
 
-        if "drive_output_folder_id" in payload:
-            API_KEY_STATE["drive_output_folder_id"] = str(
-                payload.get("drive_output_folder_id", "") or ""
-            ).strip()
+    # Deployment variables always win over persisted values.
+    if env_folder_id:
+        API_KEY_STATE["drive_folder_id"] = env_folder_id
+    if env_output_folder_id:
+        API_KEY_STATE["drive_output_folder_id"] = env_output_folder_id
+        API_KEY_STATE["drive_output_folder_name"] = "configured output folder"
 
-        API_KEY_STATE["drive_output_folder_name"] = str(
-            payload.get("drive_output_folder_name", "outputs") or "outputs"
-        ).strip() or "outputs"
-
+    if env_folder_id or env_output_folder_id:
+        print("Loaded Google Drive folder configuration from environment.")
+    elif payload is not None:
         print(
             "Restored Google Drive configuration:",
-            folder_id or folder_name,
-        )
-
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-        print(
-            "Unable to restore Google Drive configuration:",
-            repr(exc),
+            API_KEY_STATE.get("drive_folder_id")
+            or API_KEY_STATE.get("drive_folder_name"),
         )
 
 
@@ -834,23 +836,13 @@ def _pipeline_template(pipeline_item: dict, **kwargs):
     return _generic_template(pipeline_item,Path(path))
 
 
-def _pipeline_image(pipeline_item: dict, reference_paths: list[Path], instruction: str) -> tuple[bytes,str]:
-    service=str(pipeline_item.get("service") or "").strip().lower()
-    key=str(pipeline_item.get("value", "")).strip()
-    model=_provider_image_model(pipeline_item)
-    if not reference_paths:
-        raise RuntimeError("At least one reference image is required.")
-    if service=="gemini":
-        return _gemini_image(key, reference_paths, instruction), model
-    if service=="openrouter":
-        return _openrouter_image(key, reference_paths, instruction, model), model
-    if service=="openai":
-        return _openai_image(key, reference_paths, instruction), model
-    if len(reference_paths) > 1:
-        raise RuntimeError(
-            f"{pipeline_item.get('display_name', 'Selected API')} does not expose a multi-reference image-editing adapter."
-        )
-    return _generic_image(pipeline_item, reference_paths[0], instruction), model
+def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str) -> tuple[bytes,str]:
+    service=pipeline_item.get("service")
+    key=str(pipeline_item.get("value","")).strip()
+    if service=="gemini": return _gemini_image(key,reference_path,instruction),_provider_image_model(pipeline_item)
+    if service=="openrouter": return _openrouter_image(key,reference_path,instruction,_provider_image_model(pipeline_item)),_provider_image_model(pipeline_item)
+    if service=="openai": return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
+    return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
 
 def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
     """Generate social-media text using the selected text-capable API."""
@@ -1033,32 +1025,17 @@ def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
             or "API"
         ),
     )
-def _openrouter_image(api_key: str, paths: list[Path], instruction: str, model: str | None = None) -> bytes:
+def _openrouter_image(api_key: str, path: Path, instruction: str, model: str | None = None) -> bytes:
     selected_model = str(model or OPENROUTER_IMAGE_MODEL).strip()
     if not selected_model:
         raise RuntimeError("No OpenRouter image model is configured for the selected API key.")
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-
-    payload={
-        "model": selected_model,
-        "prompt": instruction,
-        "input_references": [
-            {"type": "image_url", "image_url": {"url": _image_data_url(path)}}
-            for path in paths
-        ],
-        "output_format": "png",
-    }
-    result=_openrouter_request(api_key,"images",payload,timeout=240)
-    data=result.get("data") or []
-    if not data:
-        raise RuntimeError("OpenRouter returned no image output.")
+    payload={"model":selected_model,"prompt":instruction,"input_references":[{"type":"image_url","image_url":{"url":_image_data_url(path)}}],"output_format":"png"}
+    result=_openrouter_request(api_key,"images",payload,timeout=240); data=result.get("data") or []
+    if not data: raise RuntimeError("OpenRouter returned no image output.")
     first=data[0]
-    if first.get("b64_json"):
-        return base64.b64decode(first["b64_json"])
+    if first.get("b64_json"): return base64.b64decode(first["b64_json"])
     if first.get("url"):
-        with urlopen(first["url"],timeout=120) as response:
-            return response.read()
+        with urlopen(first["url"],timeout=120) as response: return response.read()
     raise RuntimeError("OpenRouter returned no image data.")
 
 
@@ -1441,6 +1418,69 @@ def ensure_drive_outputs_folder(service, parent_folder_id: str) -> str:
     return str(created["id"])
 
 
+
+def require_drive_output_folder_configuration() -> str:
+    """Return the exact configured Google Drive output folder ID."""
+    output_id = normalize_drive_folder_id(
+        str(
+            os.getenv(DRIVE_OUTPUT_FOLDER_ENV, "")
+            or API_KEY_STATE.get("drive_output_folder_id", "")
+            or ""
+        )
+    )
+    if not output_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Google Drive output folder was configured. Set "
+                "GOOGLE_DRIVE_OUTPUT_FOLDER_ID in the backend environment."
+            ),
+        )
+    API_KEY_STATE["drive_output_folder_id"] = output_id
+    return output_id
+
+
+def get_drive_folder_name(service, folder_id: str, fallback: str) -> str:
+    """Resolve a Drive folder's display name without changing its ID."""
+    name = str(fallback or "").strip()
+    if name:
+        return name
+    metadata = service.files().get(
+        fileId=folder_id,
+        fields="id,name,mimeType",
+    ).execute()
+    if str(metadata.get("mimeType", "")) != "application/vnd.google-apps.folder":
+        raise RuntimeError("The configured Google Drive output ID is not a folder.")
+    return str(metadata.get("name") or "Google Drive output folder")
+
+
+def ensure_drive_descriptions_folder(service, parent_folder_id: str) -> str:
+    """Return/create the `descriptions` child of the configured output folder."""
+    result = service.files().list(
+        q=(
+            f"'{parent_folder_id}' in parents "
+            "and name = 'descriptions' "
+            "and mimeType = 'application/vnd.google-apps.folder' "
+            "and trashed = false"
+        ),
+        pageSize=10,
+        fields="files(id,name)",
+    ).execute()
+    folders = result.get("files", [])
+    if folders:
+        return str(folders[0]["id"])
+
+    created = service.files().create(
+        body={
+            "name": "descriptions",
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_folder_id],
+        },
+        fields="id,name",
+    ).execute()
+    return str(created["id"])
+
+
 def get_drive_files(
     service,
     folder_id: str,
@@ -1656,7 +1696,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://imagegeneratorui-production.up.railway.app",
         "https://frontend-production-14d5.up.railway.app",
     ],
     allow_credentials=True,
@@ -2043,49 +2082,34 @@ def api_key_status():
 
 @app.get("/api/drive/folders")
 def get_drive_folders():
-    """Return the configured Google Drive parent/output folders.
+    """Return the exact configured Google Drive output folder.
 
-    The frontend uses this endpoint only for the Save-to-Drive folder picker.
-    It does not expose OAuth secrets or API-key values.
+    The existing frontend still receives a folder list and can keep its
+    current Save flow, but the only selectable destination is the folder ID
+    configured by GOOGLE_DRIVE_OUTPUT_FOLDER_ID.
     """
-    folder_id, folder_name = require_drive_configuration()
+    require_drive_configuration()
 
     try:
         service = get_drive_service()
-        resolved_parent_id = resolve_drive_folder_id(
+        output_folder_id = require_drive_output_folder_configuration()
+        output_name = get_drive_folder_name(
             service,
-            folder_id,
-            folder_name,
+            output_folder_id,
+            str(API_KEY_STATE.get("drive_output_folder_name", "") or ""),
         )
 
-        # Keep the configured parent as the selectable folder. The actual
-        # generated image is always placed in its `outputs` child folder.
-        parent_name = str(folder_name or "").strip()
-        if not parent_name:
-            metadata = service.files().get(
-                fileId=resolved_parent_id,
-                fields="id,name",
-            ).execute()
-            parent_name = str(metadata.get("name") or "Google Drive folder")
-
-        outputs_folder_id = ensure_drive_outputs_folder(
-            service,
-            resolved_parent_id,
-        )
-
-        API_KEY_STATE["drive_folder_id"] = resolved_parent_id
-        API_KEY_STATE["drive_folder_name"] = parent_name
-        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
-        API_KEY_STATE["drive_output_folder_name"] = "outputs"
+        API_KEY_STATE["drive_output_folder_id"] = output_folder_id
+        API_KEY_STATE["drive_output_folder_name"] = output_name
         persist_drive_configuration()
 
         return {
             "success": True,
             "folders": [
                 {
-                    "id": resolved_parent_id,
-                    "name": parent_name,
-                    "label": parent_name,
+                    "id": output_folder_id,
+                    "name": output_name,
+                    "label": output_name,
                 }
             ],
         }
@@ -2093,10 +2117,10 @@ def get_drive_folders():
     except HTTPException:
         raise
     except Exception as exc:
-        print("Google Drive folder loading failed:", repr(exc))
+        print("Google Drive output folder loading failed:", repr(exc))
         raise HTTPException(
             status_code=500,
-            detail=f"Unable to load configured Google Drive output folders: {exc}",
+            detail=f"Unable to load configured Google Drive output folder: {exc}",
         ) from exc
 
 
@@ -2119,12 +2143,9 @@ def get_drive_inputs():
         )
 
         API_KEY_STATE["drive_folder_id"] = resolved_folder_id
-        # Create the generated-image destination once the reference folder is available.
-        output_folder_id = ensure_drive_outputs_folder(service, resolved_folder_id)
-        API_KEY_STATE["drive_output_folder_id"] = output_folder_id
-        API_KEY_STATE["drive_output_folder_name"] = "outputs"
-        persist_drive_configuration()
-
+        # The generated-image destination is configured separately through
+        # GOOGLE_DRIVE_OUTPUT_FOLDER_ID. Do not derive or overwrite it from
+        # the reference/input folder.
         return get_drive_files(
             service,
             resolved_folder_id,
@@ -2915,141 +2936,51 @@ def _resolve_generation_reference(source_type: str, source: str, filename: str, 
     if not path.exists() or not is_valid_image_file(path): raise HTTPException(status_code=400, detail="The selected reference is not a readable image.")
     return path, content_type or get_mime_type(path)
 
-def _generation_instruction(
-    prompt: str,
-    template_json: str = "{}",
-    reference_count: int = 1,
-    reference_labels: list[str] | None = None,
-) -> str:
-    labels = reference_labels or [f"Reference {i + 1}" for i in range(reference_count)]
-    reference_block = "\n".join(f"- {label}" for label in labels)
-    return f"""Create exactly ONE final image using the supplied reference images and the user's content request.
+def _generation_instruction(prompt: str, template_json: str = "{}") -> str:
+    # Template generation is intentionally disabled. The reference image and
+    # the user's manual prompt are the only design inputs.
+    return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
 
-REFERENCE IMAGES ({reference_count}):
-{reference_block}
-
-MULTI-REFERENCE RULES:
-- Treat every supplied image as an independent visual reference.
-- Do NOT make a collage, contact sheet, grid, split-screen, or collection of the references.
-- Combine the relevant visual information from the references into ONE coherent final composition.
-- Preserve the primary reference's composition/layout when it provides a poster or design structure.
-- Preserve recognizable people, products, logos, colors, decorative elements, and important visual identity from the supplied references unless the user explicitly asks to change them.
-- Use the other references as additional visual guidance rather than replacing the primary composition.
-- Replace or add only the content requested by the user.
-- Keep requested text readable, correctly spelled, and visually integrated.
-- Do not invent contact details, brands, people, products, or factual information that the user did not request.
-
-USER CONTENT REQUEST:
-{prompt}
-"""
-
-def _gemini_image(api_key: str, paths: list[Path], instruction: str) -> bytes:
-    """Generate ONE image using all selected reference images."""
+def _gemini_image(api_key: str, path: Path, instruction: str) -> bytes:
     from google import genai
     from google.genai import types
-
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-
     client = genai.Client(api_key=api_key)
-    contents = [types.Part.from_text(text=instruction)]
-    for path in paths:
-        contents.append(
-            types.Part.from_bytes(
-                data=path.read_bytes(),
-                mime_type=get_mime_type(path),
-            )
-        )
-
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-image",
-        contents=contents,
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-    )
-
+    response = client.models.generate_content(model="gemini-3.1-flash-image", contents=[types.Part.from_text(text=instruction), types.Part.from_bytes(data=path.read_bytes(), mime_type=get_mime_type(path))], config=types.GenerateContentConfig(response_modalities=["IMAGE"]))
     for part in response.parts or []:
         inline_data = getattr(part, "inline_data", None)
         if inline_data is not None:
+            # google-genai can expose an SDK image wrapper whose save() method
+            # does not accept PIL's format= keyword. Prefer the raw image bytes
+            # supplied by Gemini.
             image_data = getattr(inline_data, "data", None)
             if image_data:
                 return bytes(image_data)
 
+            # Compatibility fallback for SDK versions that do not expose the
+            # inline bytes directly.
             image_obj = part.as_image()
             out = io.BytesIO()
             image_obj.convert("RGB").save(out, "PNG")
             return out.getvalue()
+    raise RuntimeError("The Gemini API returned no image. This key may not have access to the image-generation model.")
 
-    raise RuntimeError(
-        "The Gemini API returned no image. This key may not have access to the image-generation model."
-    )
-
-def _openai_image(api_key: str, paths: list[Path], instruction: str) -> bytes:
-    """Generate ONE image from up to 16 separate reference images."""
+def _openai_image(api_key: str, path: Path, instruction: str) -> bytes:
     import mimetypes
-
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-    if len(paths) > 16:
-        raise RuntimeError("A maximum of 16 reference images can be used for one generation.")
-
     boundary="----ImageGeneratorBoundary"
+    mime=mimetypes.guess_type(path.name)[0] or "image/png"
     body=bytearray()
-
-    def field(name, value):
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n"
-                f"{value}\r\n"
-            ).encode()
-        )
-
-    field("model", "gpt-image-2")
-    field("prompt", instruction)
-
-    for path in paths:
-        mime=mimetypes.guess_type(path.name)[0] or "image/png"
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"image[]\"; filename=\"{path.name}\"\r\n"
-                f"Content-Type: {mime}\r\n\r\n"
-            ).encode()
-        )
-        body.extend(path.read_bytes())
-        body.extend(b"\r\n")
-
-    body.extend(f"--{boundary}--\r\n".encode())
-
-    req=Request(
-        "https://api.openai.com/v1/images/edits",
-        data=bytes(body),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
+    def field(name,value): return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
+    body.extend(field("model","gpt-image-2")); body.extend(field("prompt",instruction))
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"reference.png\"\r\nContent-Type: {mime}\r\n\r\n").encode()); body.extend(path.read_bytes()); body.extend(f"\r\n--{boundary}--\r\n".encode())
+    req=Request("https://api.openai.com/v1/images/edits",data=bytes(body),method="POST",headers={"Authorization":f"Bearer {api_key}","Content-Type":f"multipart/form-data; boundary={boundary}"})
     try:
-        with urlopen(req, timeout=240) as response:
-            payload=json.loads(response.read().decode())
-    except Exception as exc:
-        detail=str(exc)
-        if hasattr(exc, "read"):
-            try:
-                detail=exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-        raise RuntimeError(f"OpenAI image generation failed: {detail}") from exc
-
+        with urlopen(req,timeout=180) as response: payload=json.loads(response.read().decode())
+    except Exception as exc: raise RuntimeError(f"OpenAI image generation failed: {exc}") from exc
     item=(payload.get("data") or [None])[0]
-    if not item:
-        raise RuntimeError("OpenAI returned no image output.")
-    if item.get("b64_json"):
-        return base64.b64decode(item["b64_json"])
+    if not item: raise RuntimeError("OpenAI returned no image output.")
+    if item.get("b64_json"): return base64.b64decode(item["b64_json"])
     if item.get("url"):
-        with urlopen(item["url"], timeout=60) as response:
-            return response.read()
+        with urlopen(item["url"],timeout=60) as response: return response.read()
     raise RuntimeError("OpenAI returned no image data.")
 
 def _pipeline_description(pipeline_item: dict, image_path: Path, user_prompt: str) -> str:
@@ -3414,14 +3345,12 @@ def get_social_media_file(filename: str):
     )
 @app.post("/api/social-media/save-to-drive")
 def save_social_media_description_to_drive(
-    filename: str = Form(...)
+    filename: str = Form(...),
 ):
-    """Save only the generated social-media TXT file into Google Drive/outputs."""
-
+    """Save the generated description into output_folder/descriptions."""
     require_drive_configuration()
 
     safe_name = Path(filename).name
-
     if not safe_name or not safe_name.lower().endswith(".txt"):
         raise HTTPException(
             status_code=400,
@@ -3429,7 +3358,6 @@ def save_social_media_description_to_drive(
         )
 
     local_path = IMAGE_OUTPUT_DIR / safe_name
-
     if not local_path.exists() or not local_path.is_file():
         raise HTTPException(
             status_code=404,
@@ -3438,47 +3366,25 @@ def save_social_media_description_to_drive(
 
     try:
         service = get_drive_service()
-
-        parent_folder_id = resolve_drive_folder_id(
+        output_folder_id = require_drive_output_folder_configuration()
+        descriptions_folder_id = ensure_drive_descriptions_folder(
             service,
-            normalize_drive_folder_id(
-                API_KEY_STATE.get("drive_folder_id", "")
-            ),
-            str(
-                API_KEY_STATE.get("drive_folder_name", "")
-                or ""
-            ),
+            output_folder_id,
         )
-
-        outputs_folder_id = ensure_drive_outputs_folder(
-            service,
-            parent_folder_id,
-        )
-
-        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
-        API_KEY_STATE["drive_output_folder_name"] = "outputs"
-
-        persist_drive_configuration()
 
         escaped_name = safe_name.replace(
             chr(39),
             chr(92) + chr(39),
         )
-
-        existing = (
-            service.files()
-            .list(
-                q=(
-                    f"'{outputs_folder_id}' in parents "
-                    f"and name = '{escaped_name}' "
-                    "and trashed = false"
-                ),
-                pageSize=10,
-                fields="files(id,name,webViewLink)",
-            )
-            .execute()
-            .get("files", [])
-        )
+        existing = service.files().list(
+            q=(
+                f"'{descriptions_folder_id}' in parents "
+                f"and name = '{escaped_name}' "
+                "and trashed = false"
+            ),
+            pageSize=10,
+            fields="files(id,name,webViewLink)",
+        ).execute().get("files", [])
 
         media = MediaIoBaseUpload(
             io.BytesIO(local_path.read_bytes()),
@@ -3487,55 +3393,46 @@ def save_social_media_description_to_drive(
         )
 
         if existing:
-            drive_file = (
-                service.files()
-                .update(
-                    fileId=existing[0]["id"],
-                    media_body=media,
-                    fields="id,name,webViewLink",
-                )
-                .execute()
-            )
+            drive_file = service.files().update(
+                fileId=existing[0]["id"],
+                media_body=media,
+                fields="id,name,webViewLink",
+            ).execute()
         else:
-            drive_file = (
-                service.files()
-                .create(
-                    body={
-                        "name": safe_name,
-                        "parents": [outputs_folder_id],
-                    },
-                    media_body=media,
-                    fields="id,name,webViewLink",
-                )
-                .execute()
-            )
+            drive_file = service.files().create(
+                body={
+                    "name": safe_name,
+                    "parents": [descriptions_folder_id],
+                },
+                media_body=media,
+                fields="id,name,webViewLink",
+            ).execute()
+
+        output_name = get_drive_folder_name(
+            service,
+            output_folder_id,
+            str(API_KEY_STATE.get("drive_output_folder_name", "") or ""),
+        )
+        API_KEY_STATE["drive_output_folder_name"] = output_name
+        persist_drive_configuration()
 
         return {
             "success": True,
             "filename": safe_name,
             "drive_file_id": drive_file.get("id", ""),
-            "drive_folder": "outputs",
-            "drive_url": drive_file.get(
-                "webViewLink",
-                "",
-            ),
-            "message": (
-                "Social-media description saved "
-                "to Google Drive/outputs."
-            ),
+            "drive_folder_id": descriptions_folder_id,
+            "drive_folder": f"{output_name}/descriptions",
+            "drive_url": drive_file.get("webViewLink", ""),
+            "message": "Description saved to the descriptions subfolder of the configured Google Drive output folder.",
         }
-
     except HTTPException:
         raise
-
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Unable to save the social-media description "
-                f"to Google Drive: {exc}"
-            ),
-        ) from exc    
+            detail=f"Unable to save the social-media description to Google Drive: {exc}",
+        ) from exc
+
 @app.post("/api/images/generate")
 async def generate_output_image(
     source_type: str = Form(...),
@@ -3544,81 +3441,26 @@ async def generate_output_image(
     content_type: str = Form(""),
     prompt: str = Form(...),
     template_json: str = Form("{}"),
-    references_json: str = Form("[]"),
 ):
-    """Generate exactly ONE image from ALL currently selected references."""
     if not prompt.strip():
         raise HTTPException(
             status_code=400,
             detail="Enter a content prompt before generating the output image.",
         )
 
+    # Require at least one selected image-capable key, then try selected keys
+    # in order. A failed/limited key must not block another selected key.
     _require_pipeline_key()
-
-    # New multi-reference contract. Keep the legacy source fields as a
-    # backward-compatible fallback for older clients.
-    try:
-        raw_references = json.loads(references_json or "[]")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid references_json payload.") from exc
-
-    if not isinstance(raw_references, list):
-        raise HTTPException(status_code=400, detail="references_json must be a JSON array.")
-
-    references = []
-    for index, item in enumerate(raw_references):
-        if not isinstance(item, dict):
-            continue
-        item_source_type = str(item.get("source_type") or "").strip().lower()
-        item_source = str(item.get("source") or "").strip()
-        item_filename = str(item.get("filename") or f"reference_{index + 1}.png").strip()
-        item_content_type = str(item.get("content_type") or "").strip()
-        if not item_source_type or not item_source:
-            continue
-        references.append((index + 1, item_source_type, item_source, item_filename, item_content_type))
-
-    if not references:
-        references = [(1, source_type, source, filename, content_type)]
-
-    if len(references) > 16:
-        raise HTTPException(status_code=400, detail="A maximum of 16 reference images can be used per generation.")
-
-    reference_paths = []
-    reference_labels = []
-    try:
-        for number, item_source_type, item_source, item_filename, item_content_type in references:
-            path, _ = _resolve_generation_reference(
-                item_source_type,
-                item_source,
-                item_filename,
-                item_content_type,
-            )
-            reference_paths.append(path)
-            reference_labels.append(f"Reference {number}: {item_filename}")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to resolve selected references: {exc}") from exc
-
-    instruction = _generation_instruction(
-        prompt,
-        template_json,
-        reference_count=len(reference_paths),
-        reference_labels=reference_labels,
+    reference_path, _ = _resolve_generation_reference(
+        source_type, source, filename, content_type
     )
+    instruction = _generation_instruction(prompt, template_json)
 
     selected_candidates = [
         (candidate_id, candidate_item)
         for candidate_id, candidate_item in _selected_pipeline_candidates()
         if _pipeline_key_is_usable(candidate_item)
     ]
-
-    if not selected_candidates:
-        raise HTTPException(
-            status_code=400,
-            detail="None of the selected API keys can generate the final image.",
-        )
-
     errors = []
     image_bytes = None
     image_model = ""
@@ -3629,16 +3471,14 @@ async def generate_output_image(
         try:
             candidate_bytes, candidate_model = _pipeline_image(
                 candidate_item,
-                reference_paths,
+                reference_path,
                 instruction,
             )
             image_bytes = candidate_bytes
             image_model = candidate_model
             key_id = candidate_id
             item = candidate_item
-            # Keep only successful metadata; do not make this cached key the
-            # source of truth for the next request. Next request re-reads the
-            # current selected_ids list.
+            API_KEY_STATE["pipeline_key_id"] = candidate_id
             break
         except Exception as exc:
             errors.append(
@@ -3650,7 +3490,7 @@ async def generate_output_image(
         raise HTTPException(
             status_code=502,
             detail=(
-                "Image generation failed for all currently selected image-capable API keys. "
+                "Image generation failed for all selected image-capable API keys. "
                 f"{detail}"
             ),
         )
@@ -3659,13 +3499,18 @@ async def generate_output_image(
     output_path = IMAGE_OUTPUT_DIR / output_name
     output_path.write_bytes(image_bytes)
 
-    # Description is generated from the finished image only. It is not part
-    # of the image-generation prompt and never changes the generated pixels.
+    # Description is part of the final generation transaction so it cannot be
+    # silently lost after an otherwise successful image generation. Try the
+    # API key that actually generated the image first, then the other selected
+    # image-capable keys. A description failure must never delete/block the
+    # generated image.
     description = ""
     description_errors = []
-    description_candidates = [(key_id, item)] + [
-        pair for pair in selected_candidates if pair[0] != key_id
-    ]
+    description_candidates = [(key_id, item)]
+    for candidate_id, candidate_item in selected_candidates:
+        if candidate_id != key_id:
+            description_candidates.append((candidate_id, candidate_item))
+
     for description_key_id, description_item in description_candidates:
         try:
             description = _pipeline_description(
@@ -3678,11 +3523,15 @@ async def generate_output_image(
                 f"{description_item.get('display_name', description_key_id)}: {exc}"
             )
 
+    # Always return a visible description string even if every selected AI
+    # provider refuses the vision-description request. This fallback describes
+    # the generated asset from the user's actual request rather than inventing
+    # visual details.
     if not description:
         description = (
             f"Generated image based on the requested content: {prompt.strip()}"
             if prompt.strip()
-            else "Generated image created successfully from the selected references."
+            else "Generated image created successfully from the selected reference."
         )
 
     return {
@@ -3694,8 +3543,6 @@ async def generate_output_image(
         "api_id": key_id,
         "pipeline_api_id": key_id,
         "selected_api_count": len(API_KEY_STATE.get("selected_ids", [])),
-        "reference_count": len(reference_paths),
-        "reference_names": [label.split(": ", 1)[-1] for label in reference_labels],
         "description": description,
         "description_provider": (
             item.get("display_name", "Selected API")
@@ -3828,34 +3675,40 @@ def save_generated_image_to_drive(
     filename: str = Form(...),
     folder_id: str = Form(""),
 ):
-    """Save a generated local image into an `outputs` folder under the selected Drive folder."""
-    configured_folder_id, configured_folder_name = require_drive_configuration()
+    """Save the generated image DIRECTLY into GOOGLE_DRIVE_OUTPUT_FOLDER_ID.
+
+    ``folder_id`` remains accepted for frontend compatibility, but it is not
+    trusted as the destination. This prevents the UI picker or an old parent
+    folder from accidentally creating an ``outputs`` child and placing the
+    image there.
+    """
+    require_drive_configuration()
     safe_name = Path(filename).name
     if not safe_name:
-        raise HTTPException(status_code=400, detail="Generated image filename is required.")
+        raise HTTPException(
+            status_code=400,
+            detail="Generated image filename is required.",
+        )
 
     local_path = IMAGE_OUTPUT_DIR / safe_name
     if not local_path.exists() or not local_path.is_file():
-        raise HTTPException(status_code=404, detail="Generated image was not found on the server.")
+        raise HTTPException(
+            status_code=404,
+            detail="Generated image was not found on the server.",
+        )
 
     try:
         service = get_drive_service()
-        requested_folder_id = normalize_drive_folder_id(folder_id)
-        parent_folder_id = requested_folder_id or resolve_drive_folder_id(
-            service,
-            configured_folder_id,
-            configured_folder_name,
-        )
-        outputs_folder_id = ensure_drive_outputs_folder(service, parent_folder_id)
-        API_KEY_STATE["drive_output_folder_id"] = outputs_folder_id
-        API_KEY_STATE["drive_output_folder_name"] = "outputs"
-        persist_drive_configuration()
+        output_folder_id = require_drive_output_folder_configuration()
 
-        # Avoid creating duplicate files with the same name on repeated clicks.
+        escaped_name = safe_name.replace(
+            chr(39),
+            chr(92) + chr(39),
+        )
         existing = service.files().list(
             q=(
-                f"'{outputs_folder_id}' in parents "
-                f"and name = '{safe_name.replace(chr(39), chr(92)+chr(39))}' "
+                f"'{output_folder_id}' in parents "
+                f"and name = '{escaped_name}' "
                 "and trashed = false"
             ),
             pageSize=10,
@@ -3864,7 +3717,7 @@ def save_generated_image_to_drive(
 
         media = MediaIoBaseUpload(
             io.BytesIO(local_path.read_bytes()),
-            mimetype="image/png",
+            mimetype=get_mime_type(local_path),
             resumable=False,
         )
 
@@ -3876,23 +3729,38 @@ def save_generated_image_to_drive(
             ).execute()
         else:
             drive_file = service.files().create(
-                body={"name": safe_name, "parents": [outputs_folder_id]},
+                body={
+                    "name": safe_name,
+                    "parents": [output_folder_id],
+                },
                 media_body=media,
                 fields="id,name,webViewLink",
             ).execute()
+
+        output_name = get_drive_folder_name(
+            service,
+            output_folder_id,
+            str(API_KEY_STATE.get("drive_output_folder_name", "") or ""),
+        )
+        API_KEY_STATE["drive_output_folder_name"] = output_name
+        persist_drive_configuration()
 
         return {
             "success": True,
             "filename": safe_name,
             "drive_file_id": drive_file.get("id", ""),
-            "drive_folder": "outputs",
+            "drive_folder_id": output_folder_id,
+            "drive_folder": output_name,
             "drive_url": drive_file.get("webViewLink", ""),
-            "message": "Generated image saved to Google Drive/outputs.",
+            "message": "Generated image saved directly to the configured Google Drive output folder.",
         }
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to save generated image to Google Drive: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to save generated image to Google Drive: {exc}",
+        ) from exc
 
 
 # Generate AI prompt from reference
