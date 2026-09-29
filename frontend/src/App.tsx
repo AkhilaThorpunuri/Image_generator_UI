@@ -6027,25 +6027,33 @@ const handleOpenGeneratedImageInCanva = async () => {
                 )}
 
                 
-<div
-  style={{
-    display: "flex",
-    gap: "10px",
-    flexWrap: "wrap",
-    marginTop: "16px",
-  }}
->
-  <button
-    type="button"
-    className="secondary-button"
-    onClick={handleOpenGeneratedImageInCanva}
-    disabled={isCreatingCanvaDesign}
+{generatedImageUrl && (
+  <div
+    style={{
+      display: "flex",
+      gap: "10px",
+      flexWrap: "wrap",
+      marginTop: "16px",
+    }}
   >
-    {isCreatingCanvaDesign
-      ? "Opening Canva..."
-      : "🎨 Edit in Canva"}
-  </button>
-</div>
+    <button
+      type="button"
+      className="secondary-button"
+      onClick={handleOpenGeneratedImageInCanva}
+      disabled={isCreatingCanvaDesign}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "8px",
+      }}
+    >
+      {isCreatingCanvaDesign
+        ? "Opening Canva..."
+        : "🎨 EDIT IN CANVA TEST"}
+    </button>
+  </div>
+)}
 
 {canvaMessage && (
   <div
