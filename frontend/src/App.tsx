@@ -18,7 +18,7 @@ import type {
 } from "./services/templateService";
 
 
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL = "https://agentic-content-generator-production.up.railway.app";
 
 
 function resolveApiUrl(url: string): string {
