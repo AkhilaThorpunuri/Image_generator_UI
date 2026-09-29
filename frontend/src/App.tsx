@@ -12,13 +12,15 @@ import type {
 
 import "./App.css";
 
-import { generateTemplate } from "./services/templateService";
 import type {
   GenerateTemplateResponse,
 } from "./services/templateService";
 
 
-const API_BASE_URL = "https://agentic-content-generator-production.up.railway.app";
+const API_BASE_URL =
+  window.location.hostname.includes("railway.app")
+    ? "https://agentic-content-generator-production.up.railway.app"
+    : "http://localhost:8000";
 
 
 function resolveApiUrl(url: string): string {
@@ -153,34 +155,6 @@ function isImageUrl(url: string): boolean {
     );
   } catch {
     return false;
-  }
-}
-
-
-function formatReferenceType(
-  type: ReferenceType,
-): string {
-  switch (type) {
-    case "image":
-      return "Image";
-
-    case "gif":
-      return "GIF";
-
-    case "pdf":
-      return "PDF";
-
-    case "video":
-      return "Video";
-
-    case "youtube":
-      return "YouTube";
-
-    case "image-link":
-      return "Image Link";
-
-    default:
-      return "Reference";
   }
 }
 
@@ -1456,7 +1430,6 @@ function getApiServiceIcon(
 
 function ImageGenerator({
   selectedApiKeys,
-  selectedApiServices,
   availableApiServices,
   onApiSelectionChange,
   onBackToApiSetup,
@@ -1493,9 +1466,6 @@ function ImageGenerator({
       "manual",
     );
 
-  const [isGeneratingPrompt, setIsGeneratingPrompt] =
-    useState(false);
-
   const [templateResult, setTemplateResult] =
     useState<GenerateTemplateResponse | null>(
       null,
@@ -1526,6 +1496,13 @@ function ImageGenerator({
     text: string;
     character_count: number;
     character_limit: number;
+    word_count: number;
+    target_word_count?: number;
+    minimum_word_count?: number;
+    maximum_word_count?: number;
+    icon?: string;
+    company_tags?: string[];
+    tags?: string[];
   };
 
   const [socialDescriptions, setSocialDescriptions] =
@@ -2906,172 +2883,9 @@ function ImageGenerator({
 
   /*
    * ------------------------------------------------------------
-   * Remove reference
-   * ------------------------------------------------------------
-   */
-
-  function handleRemoveReference() {
-
-    if (
-      reference?.source ===
-        "upload" &&
-      reference.url.startsWith(
-        "blob:",
-      )
-    ) {
-
-      URL.revokeObjectURL(
-        reference.url,
-      );
-    }
-
-
-    setReference(
-      null,
-    );
-
-    setSelectedInputIds([]);
-
-    setTemplatePrompt(
-      "",
-    );
-
-    setPromptMode(
-      "manual",
-    );
-
-    setTemplateResult(
-      null,
-    );
-
-    setGeneratedImageUrl("");
-    setGeneratedImageFilename("");
-    setGeneratedImageDescription("");
-    setSocialDescriptions({});
-    setSocialDescriptionFilename("");
-    setSocialDescriptionPreviewContent("");
-    setSocialDescriptionSaved(false);
-    setSocialDescriptionSaveMessage("");
-    setIsSocialDescriptionPreviewOpen(false);
-    setGeneratedImageModel("");
-
-    setError("");
-  }
-
-
-  /*
-   * ------------------------------------------------------------
    * Automatic template generation
    * ------------------------------------------------------------
    */
-
-  async function generateTemplateForReference(
-    currentReference: ReferenceData,
-  ) {
-
-    if (selectedApiKeys.length === 0) {
-      setTemplateResult(null);
-      setTemplateApiProvider("");
-      setTemplateApiModel("");
-      return;
-    }
-
-    if (
-      currentReference.type ===
-        "pdf" ||
-      currentReference.type ===
-        "video"
-    ) {
-
-      setTemplateResult(
-        null,
-      );
-
-
-      setError(
-        "Template generation currently supports images, GIFs and YouTube references.",
-      );
-
-
-      return;
-    }
-
-
-    setError("");
-
-    setIsGeneratingTemplate(
-      true,
-    );
-
-    setTemplateResult(
-      null,
-    );
-    setTemplateApiProvider("");
-    setTemplateApiModel("");
-
-
-    try {
-
-      const result =
-        await generateTemplate({
-          type:
-            currentReference.type,
-
-          name:
-            currentReference.name,
-
-          /*
-           * `url` is only the browser preview URL.
-           * `sourceId` is the value the backend uses to locate the
-           * actual reference.
-           */
-          url:
-            currentReference.url,
-
-          source:
-            currentReference.source as any,
-
-          sourceId:
-            currentReference.sourceId,
-
-          mimeType:
-            currentReference.mimeType,
-        });
-
-
-      setTemplateResult(
-        result,
-      );
-
-      const templateMetadata = result as GenerateTemplateResponse & {
-        provider?: string;
-        model?: string;
-      };
-      setTemplateApiProvider(String(templateMetadata.provider || ""));
-      setTemplateApiModel(String(templateMetadata.model || ""));
-
-    } catch (err) {
-
-      console.error(
-        "Automatic template generation failed:",
-        err,
-      );
-
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to generate template from the reference.",
-      );
-
-    } finally {
-
-      setIsGeneratingTemplate(
-        false,
-      );
-    }
-  }
-
 
   /*
    * ------------------------------------------------------------
@@ -3083,19 +2897,6 @@ function ImageGenerator({
    */
 
 
-  /*
-   * ------------------------------------------------------------
-   * Generate AI prompt
-   * ------------------------------------------------------------
-   */
-
-  function handleGeneratePrompt() {
-    setIsGeneratingPrompt(false);
-    setPromptMode("manual");
-    setPromptApiProvider("");
-    setPromptApiModel("");
-    setError("AI prompt generation is temporarily disabled. Enter the content prompt manually.");
-  }
 
   /*
    * ------------------------------------------------------------
@@ -3245,6 +3046,9 @@ function ImageGenerator({
       }
 
       const firstReference = selectedReferences[0];
+      if (!firstReference) {
+        throw new Error("At least one reference image is required.");
+      }
       const formData = new FormData();
       formData.append("source_type", firstReference.source_type);
       formData.append("source", firstReference.source);
@@ -3463,13 +3267,15 @@ const handleOpenGeneratedImageInCanva = async () => {
 
     if (!status?.configured) {
       throw new Error(
-        "Canva Connect is not configured. Set CANVA_CONNECT_CLIENT_ID and CANVA_CONNECT_CLIENT_SECRET in the backend environment.",
+        "Canva Connect is not configured. Set CANVA_CLIENT_ID, CANVA_CLIENT_SECRET, and CANVA_CONNECT_REDIRECT_URI in the backend environment.",
       );
     }
 
     if (!status?.authenticated) {
       const authResponse = await fetch(
-        `${API_BASE_URL}/api/canva/connect/oauth/start`,
+        `${API_BASE_URL}/api/canva/connect/oauth/start?filename=${encodeURIComponent(
+          generatedImageFilename,
+        )}`,
         { credentials: "include" },
       );
       const authData = await authResponse.json().catch(() => null);
@@ -3496,7 +3302,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setCanvaMessage(
-        "Canva authorization opened in a new tab. Approve access, return here, and click Open / Edit in Canva again.",
+        "Canva authorization opened in a new tab. Approve access. After authorization, the generated image will open in Canva automatically.",
       );
       return;
     }
@@ -3629,12 +3435,28 @@ const handleOpenGeneratedImageInCanva = async () => {
         data?.descriptions &&
         typeof data.descriptions === "object"
       ) {
-        setSocialDescriptions(
-          data.descriptions as Record<
-            string,
-            SocialDescriptionItem
-          >,
-        );
+        const normalizedDescriptions: Record<string, SocialDescriptionItem> = {};
+        Object.entries(data.descriptions as Record<string, any>).forEach(([platform, value]) => {
+          const item = value && typeof value === "object" ? value : {};
+          const text = String(item.text || item.content || "").trim();
+          normalizedDescriptions[platform] = {
+            text,
+            character_count: Number(item.character_count || text.length),
+            character_limit: Number(item.character_limit || 0),
+            word_count: Number(item.word_count || text.split(/\s+/).filter(Boolean).length),
+            target_word_count: Number(item.target_word_count || 0) || undefined,
+            minimum_word_count: Number(item.minimum_word_count || 0) || undefined,
+            maximum_word_count: Number(item.maximum_word_count || 0) || undefined,
+            icon: String(item.icon || "✦"),
+            company_tags: Array.isArray(item.company_tags)
+              ? item.company_tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
+              : [],
+            tags: Array.isArray(item.tags)
+              ? item.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
+              : [],
+          };
+        });
+        setSocialDescriptions(normalizedDescriptions);
       } else {
         const rawContent =
           String(data?.content || "").trim();
@@ -3712,10 +3534,12 @@ const handleOpenGeneratedImageInCanva = async () => {
           if (content) {
             parsed[platform] = {
               text: content,
-              character_count:
-                content.length,
-              character_limit:
-                limits[heading],
+              character_count: content.length,
+              character_limit: limits[heading],
+              word_count: content.split(/\s+/).filter(Boolean).length,
+              icon: "✦",
+              company_tags: [],
+              tags: (content.match(/#[A-Za-z0-9_]+/g) || []).slice(0, 8),
             };
           }
         });
@@ -5519,10 +5343,10 @@ const handleOpenGeneratedImageInCanva = async () => {
                   </span>
                 </div>
 
-                {templateResult.template.text_groups &&
-                templateResult.template.text_groups.length > 0 ? (
+                {templateResult!.template.text_groups &&
+                templateResult!.template.text_groups.length > 0 ? (
                   <div className="editable-text-list">
-                    {(Array.isArray(templateResult.template.text_groups) ? templateResult.template.text_groups : []).map((group) => (
+                    {(Array.isArray(templateResult!.template.text_groups) ? templateResult!.template.text_groups : []).map((group) => (
                       <div
                         key={group.id}
                         className="editable-text-item"
@@ -5544,10 +5368,10 @@ const handleOpenGeneratedImageInCanva = async () => {
                       </div>
                     ))}
                   </div>
-                ) : templateResult.template.text_elements &&
-                  templateResult.template.text_elements.length > 0 ? (
+                ) : templateResult!.template.text_elements &&
+                  templateResult!.template.text_elements.length > 0 ? (
                   <div className="editable-text-list">
-                    {(Array.isArray(templateResult.template.text_elements) ? templateResult.template.text_elements : []).map((element) => (
+                    {(Array.isArray(templateResult!.template.text_elements) ? templateResult!.template.text_elements : []).map((element) => (
                       <div
                         key={element.id}
                         className="editable-text-item"
@@ -6039,7 +5863,7 @@ const handleOpenGeneratedImageInCanva = async () => {
   >
     {isCreatingCanvaDesign
       ? "Opening Canva..."
-      : "Open / Edit in Canva"}
+      : "🎨 Edit in Canva"}
   </button>
 </div>
 
@@ -6167,7 +5991,7 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
     >
       {socialDescriptionSaved
-        ? "Saved to Google Drive / outputs"
+        ? "Saved to Google Drive / descriptions"
         : "Save Description"}
     </button>
   </div>
@@ -6203,51 +6027,31 @@ const handleOpenGeneratedImageInCanva = async () => {
         marginTop: "12px",
       }}
     >
-      {(
-        Object.entries(
-          socialDescriptions,
-        ) as Array<
-          [string, SocialDescriptionItem]
-        >
-      ).map(([platform, item]) => (
-        <div
-          key={platform}
-          style={{
-            padding: "9px 10px",
-            borderRadius: "9px",
-            background:
-              "rgba(255,255,255,0.045)",
-            border:
-              "1px solid rgba(255,255,255,0.08)",
-          }}
-        >
+      {(Object.entries(socialDescriptions) as Array<[string, SocialDescriptionItem]>).map(
+        ([platform, item]) => (
           <div
+            key={platform}
             style={{
+              padding: "10px 12px",
+              borderRadius: "9px",
+              background: "rgba(255,255,255,0.045)",
+              border: "1px solid rgba(255,255,255,0.08)",
               display: "flex",
+              alignItems: "center",
               justifyContent: "space-between",
-              gap: "8px",
-              fontSize: "11px",
+              gap: "12px",
             }}
           >
-            <strong>{platform}</strong>
-            <span style={{ opacity: 0.65 }}>
-              {item.character_count} /{" "}
-              {item.character_limit}
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <span style={{ fontSize: "16px" }}>{item.icon || "✦"}</span>
+              <strong style={{ fontSize: "12px" }}>{platform}</strong>
+            </div>
+            <span style={{ opacity: 0.72, fontSize: "12px", fontWeight: 700 }}>
+              {item.word_count} words
             </span>
           </div>
-
-          <p
-            style={{
-              margin: "6px 0 0",
-              fontSize: "12px",
-              lineHeight: 1.45,
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {item.text}
-          </p>
-        </div>
-      ))}
+        ),
+      )}
     </div>
   )}
 </div>
@@ -6540,53 +6344,56 @@ const handleOpenGeneratedImageInCanva = async () => {
                 gap: "12px",
               }}
             >
-              {(
-                Object.entries(
-                  socialDescriptions,
-                ) as Array<
-                  [string, SocialDescriptionItem]
-                >
-              ).map(([platform, item]) => (
+              {(Object.entries(socialDescriptions) as Array<[string, SocialDescriptionItem]>).map(([platform, item]) => (
                 <article
                   key={platform}
                   style={{
                     padding: "14px",
                     borderRadius: "12px",
-                    border:
-                      "1px solid rgba(255,255,255,0.10)",
-                    background:
-                      "rgba(255,255,255,0.035)",
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    background: "rgba(255,255,255,0.035)",
                   }}
                 >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent:
-                        "space-between",
-                      gap: "8px",
-                    }}
-                  >
-                    <strong>{platform}</strong>
-                    <span
-                      style={{
-                        opacity: 0.65,
-                        fontSize: "12px",
-                      }}
-                    >
-                      {item.character_count} /{" "}
-                      {item.character_limit}
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <span style={{ fontSize: "20px" }}>{item.icon || "✦"}</span>
+                      <strong>{platform}</strong>
+                    </div>
+                    <span style={{ opacity: 0.72, fontSize: "12px", fontWeight: 700 }}>
+                      {item.word_count} words
+                      {item.target_word_count ? ` / ${item.target_word_count} target` : ""}
                     </span>
                   </div>
 
-                  <p
-                    style={{
-                      margin: "8px 0 0",
-                      whiteSpace: "pre-wrap",
-                      lineHeight: 1.5,
-                    }}
-                  >
+                  <p style={{ margin: "12px 0 0", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
                     {item.text}
                   </p>
+
+                  {item.company_tags && item.company_tags.length > 0 && (
+                    <div style={{ marginTop: "12px" }}>
+                      <strong style={{ fontSize: "11px", opacity: 0.72 }}>Company Tags</strong>
+                      <div style={{ marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                        {item.company_tags.map((tag) => (
+                          <span key={tag} style={{ padding: "4px 7px", borderRadius: "999px", background: "rgba(120,100,255,0.14)", fontSize: "11px" }}>
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {item.tags && item.tags.length > 0 && (
+                    <div style={{ marginTop: "10px" }}>
+                      <strong style={{ fontSize: "11px", opacity: 0.72 }}>Tags</strong>
+                      <div style={{ marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                        {item.tags.map((tag) => (
+                          <span key={tag} style={{ padding: "4px 7px", borderRadius: "999px", background: "rgba(255,255,255,0.06)", fontSize: "11px" }}>
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
