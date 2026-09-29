@@ -6054,6 +6054,29 @@ const handleOpenGeneratedImageInCanva = async () => {
     </button>
   </div>
 )}
+<button
+  type="button"
+  onClick={handleOpenGeneratedImageInCanva}
+  disabled={!generatedImageFilename || isCreatingCanvaDesign}
+  style={{
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "8px",
+    minHeight: "42px",
+    padding: "10px 18px",
+    borderRadius: "10px",
+    border: "1px solid rgba(123, 92, 255, 0.45)",
+    background: isCreatingCanvaDesign
+      ? "rgba(123, 92, 255, 0.25)"
+      : "linear-gradient(135deg, #7b4dff, #4f8cff)",
+    color: "#fff",
+    fontWeight: 800,
+    cursor: "pointer",
+  }}
+>
+  🎨 {isCreatingCanvaDesign ? "Opening Canva..." : "Edit in Canva"}
+</button>
 
 {canvaMessage && (
   <div
@@ -7395,20 +7418,6 @@ function App() {
           onBackToHome={() => navigateTo("/")}
         />
       </div>
-      <div
-  style={{
-    position: "fixed",
-    top: 10,
-    right: 10,
-    zIndex: 999999,
-    background: "red",
-    color: "white",
-    padding: "15px",
-    fontWeight: 900,
-  }}
->
-  RAILWAY TEST 12345
-</div>
     </>
   );
 }
