@@ -1656,6 +1656,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://imagegeneratorui-production.up.railway.app",
         "https://frontend-production-14d5.up.railway.app",
     ],
     allow_credentials=True,
