@@ -41,7 +41,7 @@ CANVA_CONNECT_AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
 CANVA_CONNECT_TOKEN_URL = f"{CANVA_CONNECT_API_URL}/oauth/token"
 CANVA_CONNECT_REDIRECT_URI = os.getenv(
     "CANVA_CONNECT_REDIRECT_URI",
-    "http://127.0.0.1:8000/api/canva/connect/oauth/callback",
+    "https://agentic-content-generator-production.up.railway.app/api/canva/connect/oauth/callback",
 ).strip()
 CANVA_CONNECT_SCOPES = os.getenv(
     "CANVA_CONNECT_SCOPES",
