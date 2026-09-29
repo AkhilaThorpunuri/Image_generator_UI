@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import io
 import json
@@ -25,6 +24,7 @@ from pydantic import BaseModel
 from fastapi.responses import (
     FileResponse,
     StreamingResponse,
+    HTMLResponse,
 )
 
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -49,6 +49,10 @@ from app.services.template_generator import (
 from app.services.prompt_generator import (
     generate_image_prompt,
 )
+
+# Canva Connect integration. This is independent of the existing Google Drive
+# authentication and image-generation pipeline.
+from app.services.canva_connect_service import canva_connect_service
 
 
 # -------------------------------------------------------------------
@@ -835,23 +839,13 @@ def _pipeline_template(pipeline_item: dict, **kwargs):
     return _generic_template(pipeline_item,Path(path))
 
 
-def _pipeline_image(pipeline_item: dict, reference_paths: list[Path], instruction: str) -> tuple[bytes,str]:
-    service=str(pipeline_item.get("service") or "").strip().lower()
-    key=str(pipeline_item.get("value", "")).strip()
-    model=_provider_image_model(pipeline_item)
-    if not reference_paths:
-        raise RuntimeError("At least one reference image is required.")
-    if service=="gemini":
-        return _gemini_image(key, reference_paths, instruction), model
-    if service=="openrouter":
-        return _openrouter_image(key, reference_paths, instruction, model), model
-    if service=="openai":
-        return _openai_image(key, reference_paths, instruction), model
-    if len(reference_paths) > 1:
-        raise RuntimeError(
-            f"{pipeline_item.get('display_name', 'Selected API')} does not expose a multi-reference image-editing adapter."
-        )
-    return _generic_image(pipeline_item, reference_paths[0], instruction), model
+def _pipeline_image(pipeline_item: dict, reference_path: Path, instruction: str) -> tuple[bytes,str]:
+    service=pipeline_item.get("service")
+    key=str(pipeline_item.get("value","")).strip()
+    if service=="gemini": return _gemini_image(key,reference_path,instruction),_provider_image_model(pipeline_item)
+    if service=="openrouter": return _openrouter_image(key,reference_path,instruction,_provider_image_model(pipeline_item)),_provider_image_model(pipeline_item)
+    if service=="openai": return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
+    return _generic_image(pipeline_item,reference_path,instruction),_provider_image_model(pipeline_item)
 
 def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
     """Generate social-media text using the selected text-capable API."""
@@ -1034,32 +1028,17 @@ def _pipeline_social_text(pipeline_item: dict, instruction: str) -> str:
             or "API"
         ),
     )
-def _openrouter_image(api_key: str, paths: list[Path], instruction: str, model: str | None = None) -> bytes:
+def _openrouter_image(api_key: str, path: Path, instruction: str, model: str | None = None) -> bytes:
     selected_model = str(model or OPENROUTER_IMAGE_MODEL).strip()
     if not selected_model:
         raise RuntimeError("No OpenRouter image model is configured for the selected API key.")
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-
-    payload={
-        "model": selected_model,
-        "prompt": instruction,
-        "input_references": [
-            {"type": "image_url", "image_url": {"url": _image_data_url(path)}}
-            for path in paths
-        ],
-        "output_format": "png",
-    }
-    result=_openrouter_request(api_key,"images",payload,timeout=240)
-    data=result.get("data") or []
-    if not data:
-        raise RuntimeError("OpenRouter returned no image output.")
+    payload={"model":selected_model,"prompt":instruction,"input_references":[{"type":"image_url","image_url":{"url":_image_data_url(path)}}],"output_format":"png"}
+    result=_openrouter_request(api_key,"images",payload,timeout=240); data=result.get("data") or []
+    if not data: raise RuntimeError("OpenRouter returned no image output.")
     first=data[0]
-    if first.get("b64_json"):
-        return base64.b64decode(first["b64_json"])
+    if first.get("b64_json"): return base64.b64decode(first["b64_json"])
     if first.get("url"):
-        with urlopen(first["url"],timeout=120) as response:
-            return response.read()
+        with urlopen(first["url"],timeout=120) as response: return response.read()
     raise RuntimeError("OpenRouter returned no image data.")
 
 
@@ -1658,6 +1637,7 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://frontend-production-14d5.up.railway.app",
+        "https://imagegeneratorui-production.up.railway.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -2915,141 +2895,51 @@ def _resolve_generation_reference(source_type: str, source: str, filename: str, 
     if not path.exists() or not is_valid_image_file(path): raise HTTPException(status_code=400, detail="The selected reference is not a readable image.")
     return path, content_type or get_mime_type(path)
 
-def _generation_instruction(
-    prompt: str,
-    template_json: str = "{}",
-    reference_count: int = 1,
-    reference_labels: list[str] | None = None,
-) -> str:
-    labels = reference_labels or [f"Reference {i + 1}" for i in range(reference_count)]
-    reference_block = "\n".join(f"- {label}" for label in labels)
-    return f"""Create exactly ONE final image using the supplied reference images and the user's content request.
+def _generation_instruction(prompt: str, template_json: str = "{}") -> str:
+    # Template generation is intentionally disabled. The reference image and
+    # the user's manual prompt are the only design inputs.
+    return f"""Edit the supplied reference image into the requested final poster. Preserve the reference composition, layout, colors, decorative elements, logo placement, people/objects, and overall visual style. Do not redesign it from scratch. Replace only the content requested by the user. Keep text in the same regions and hierarchy, with correct spelling and readable typography. Do not invent contact details or extra content.\n\nUSER CONTENT REQUEST:\n{prompt}"""
 
-REFERENCE IMAGES ({reference_count}):
-{reference_block}
-
-MULTI-REFERENCE RULES:
-- Treat every supplied image as an independent visual reference.
-- Do NOT make a collage, contact sheet, grid, split-screen, or collection of the references.
-- Combine the relevant visual information from the references into ONE coherent final composition.
-- Preserve the primary reference's composition/layout when it provides a poster or design structure.
-- Preserve recognizable people, products, logos, colors, decorative elements, and important visual identity from the supplied references unless the user explicitly asks to change them.
-- Use the other references as additional visual guidance rather than replacing the primary composition.
-- Replace or add only the content requested by the user.
-- Keep requested text readable, correctly spelled, and visually integrated.
-- Do not invent contact details, brands, people, products, or factual information that the user did not request.
-
-USER CONTENT REQUEST:
-{prompt}
-"""
-
-def _gemini_image(api_key: str, paths: list[Path], instruction: str) -> bytes:
-    """Generate ONE image using all selected reference images."""
+def _gemini_image(api_key: str, path: Path, instruction: str) -> bytes:
     from google import genai
     from google.genai import types
-
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-
     client = genai.Client(api_key=api_key)
-    contents = [types.Part.from_text(text=instruction)]
-    for path in paths:
-        contents.append(
-            types.Part.from_bytes(
-                data=path.read_bytes(),
-                mime_type=get_mime_type(path),
-            )
-        )
-
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-image",
-        contents=contents,
-        config=types.GenerateContentConfig(response_modalities=["IMAGE"]),
-    )
-
+    response = client.models.generate_content(model="gemini-3.1-flash-image", contents=[types.Part.from_text(text=instruction), types.Part.from_bytes(data=path.read_bytes(), mime_type=get_mime_type(path))], config=types.GenerateContentConfig(response_modalities=["IMAGE"]))
     for part in response.parts or []:
         inline_data = getattr(part, "inline_data", None)
         if inline_data is not None:
+            # google-genai can expose an SDK image wrapper whose save() method
+            # does not accept PIL's format= keyword. Prefer the raw image bytes
+            # supplied by Gemini.
             image_data = getattr(inline_data, "data", None)
             if image_data:
                 return bytes(image_data)
 
+            # Compatibility fallback for SDK versions that do not expose the
+            # inline bytes directly.
             image_obj = part.as_image()
             out = io.BytesIO()
             image_obj.convert("RGB").save(out, "PNG")
             return out.getvalue()
+    raise RuntimeError("The Gemini API returned no image. This key may not have access to the image-generation model.")
 
-    raise RuntimeError(
-        "The Gemini API returned no image. This key may not have access to the image-generation model."
-    )
-
-def _openai_image(api_key: str, paths: list[Path], instruction: str) -> bytes:
-    """Generate ONE image from up to 16 separate reference images."""
+def _openai_image(api_key: str, path: Path, instruction: str) -> bytes:
     import mimetypes
-
-    if not paths:
-        raise RuntimeError("At least one reference image is required.")
-    if len(paths) > 16:
-        raise RuntimeError("A maximum of 16 reference images can be used for one generation.")
-
     boundary="----ImageGeneratorBoundary"
+    mime=mimetypes.guess_type(path.name)[0] or "image/png"
     body=bytearray()
-
-    def field(name, value):
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"{name}\"\r\n\r\n"
-                f"{value}\r\n"
-            ).encode()
-        )
-
-    field("model", "gpt-image-2")
-    field("prompt", instruction)
-
-    for path in paths:
-        mime=mimetypes.guess_type(path.name)[0] or "image/png"
-        body.extend(
-            (
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"image[]\"; filename=\"{path.name}\"\r\n"
-                f"Content-Type: {mime}\r\n\r\n"
-            ).encode()
-        )
-        body.extend(path.read_bytes())
-        body.extend(b"\r\n")
-
-    body.extend(f"--{boundary}--\r\n".encode())
-
-    req=Request(
-        "https://api.openai.com/v1/images/edits",
-        data=bytes(body),
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-    )
+    def field(name,value): return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n").encode()
+    body.extend(field("model","gpt-image-2")); body.extend(field("prompt",instruction))
+    body.extend((f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"reference.png\"\r\nContent-Type: {mime}\r\n\r\n").encode()); body.extend(path.read_bytes()); body.extend(f"\r\n--{boundary}--\r\n".encode())
+    req=Request("https://api.openai.com/v1/images/edits",data=bytes(body),method="POST",headers={"Authorization":f"Bearer {api_key}","Content-Type":f"multipart/form-data; boundary={boundary}"})
     try:
-        with urlopen(req, timeout=240) as response:
-            payload=json.loads(response.read().decode())
-    except Exception as exc:
-        detail=str(exc)
-        if hasattr(exc, "read"):
-            try:
-                detail=exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-        raise RuntimeError(f"OpenAI image generation failed: {detail}") from exc
-
+        with urlopen(req,timeout=180) as response: payload=json.loads(response.read().decode())
+    except Exception as exc: raise RuntimeError(f"OpenAI image generation failed: {exc}") from exc
     item=(payload.get("data") or [None])[0]
-    if not item:
-        raise RuntimeError("OpenAI returned no image output.")
-    if item.get("b64_json"):
-        return base64.b64decode(item["b64_json"])
+    if not item: raise RuntimeError("OpenAI returned no image output.")
+    if item.get("b64_json"): return base64.b64decode(item["b64_json"])
     if item.get("url"):
-        with urlopen(item["url"], timeout=60) as response:
-            return response.read()
+        with urlopen(item["url"],timeout=60) as response: return response.read()
     raise RuntimeError("OpenAI returned no image data.")
 
 def _pipeline_description(pipeline_item: dict, image_path: Path, user_prompt: str) -> str:
@@ -3544,81 +3434,26 @@ async def generate_output_image(
     content_type: str = Form(""),
     prompt: str = Form(...),
     template_json: str = Form("{}"),
-    references_json: str = Form("[]"),
 ):
-    """Generate exactly ONE image from ALL currently selected references."""
     if not prompt.strip():
         raise HTTPException(
             status_code=400,
             detail="Enter a content prompt before generating the output image.",
         )
 
+    # Require at least one selected image-capable key, then try selected keys
+    # in order. A failed/limited key must not block another selected key.
     _require_pipeline_key()
-
-    # New multi-reference contract. Keep the legacy source fields as a
-    # backward-compatible fallback for older clients.
-    try:
-        raw_references = json.loads(references_json or "[]")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid references_json payload.") from exc
-
-    if not isinstance(raw_references, list):
-        raise HTTPException(status_code=400, detail="references_json must be a JSON array.")
-
-    references = []
-    for index, item in enumerate(raw_references):
-        if not isinstance(item, dict):
-            continue
-        item_source_type = str(item.get("source_type") or "").strip().lower()
-        item_source = str(item.get("source") or "").strip()
-        item_filename = str(item.get("filename") or f"reference_{index + 1}.png").strip()
-        item_content_type = str(item.get("content_type") or "").strip()
-        if not item_source_type or not item_source:
-            continue
-        references.append((index + 1, item_source_type, item_source, item_filename, item_content_type))
-
-    if not references:
-        references = [(1, source_type, source, filename, content_type)]
-
-    if len(references) > 16:
-        raise HTTPException(status_code=400, detail="A maximum of 16 reference images can be used per generation.")
-
-    reference_paths = []
-    reference_labels = []
-    try:
-        for number, item_source_type, item_source, item_filename, item_content_type in references:
-            path, _ = _resolve_generation_reference(
-                item_source_type,
-                item_source,
-                item_filename,
-                item_content_type,
-            )
-            reference_paths.append(path)
-            reference_labels.append(f"Reference {number}: {item_filename}")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to resolve selected references: {exc}") from exc
-
-    instruction = _generation_instruction(
-        prompt,
-        template_json,
-        reference_count=len(reference_paths),
-        reference_labels=reference_labels,
+    reference_path, _ = _resolve_generation_reference(
+        source_type, source, filename, content_type
     )
+    instruction = _generation_instruction(prompt, template_json)
 
     selected_candidates = [
         (candidate_id, candidate_item)
         for candidate_id, candidate_item in _selected_pipeline_candidates()
         if _pipeline_key_is_usable(candidate_item)
     ]
-
-    if not selected_candidates:
-        raise HTTPException(
-            status_code=400,
-            detail="None of the selected API keys can generate the final image.",
-        )
-
     errors = []
     image_bytes = None
     image_model = ""
@@ -3629,16 +3464,14 @@ async def generate_output_image(
         try:
             candidate_bytes, candidate_model = _pipeline_image(
                 candidate_item,
-                reference_paths,
+                reference_path,
                 instruction,
             )
             image_bytes = candidate_bytes
             image_model = candidate_model
             key_id = candidate_id
             item = candidate_item
-            # Keep only successful metadata; do not make this cached key the
-            # source of truth for the next request. Next request re-reads the
-            # current selected_ids list.
+            API_KEY_STATE["pipeline_key_id"] = candidate_id
             break
         except Exception as exc:
             errors.append(
@@ -3650,7 +3483,7 @@ async def generate_output_image(
         raise HTTPException(
             status_code=502,
             detail=(
-                "Image generation failed for all currently selected image-capable API keys. "
+                "Image generation failed for all selected image-capable API keys. "
                 f"{detail}"
             ),
         )
@@ -3659,13 +3492,18 @@ async def generate_output_image(
     output_path = IMAGE_OUTPUT_DIR / output_name
     output_path.write_bytes(image_bytes)
 
-    # Description is generated from the finished image only. It is not part
-    # of the image-generation prompt and never changes the generated pixels.
+    # Description is part of the final generation transaction so it cannot be
+    # silently lost after an otherwise successful image generation. Try the
+    # API key that actually generated the image first, then the other selected
+    # image-capable keys. A description failure must never delete/block the
+    # generated image.
     description = ""
     description_errors = []
-    description_candidates = [(key_id, item)] + [
-        pair for pair in selected_candidates if pair[0] != key_id
-    ]
+    description_candidates = [(key_id, item)]
+    for candidate_id, candidate_item in selected_candidates:
+        if candidate_id != key_id:
+            description_candidates.append((candidate_id, candidate_item))
+
     for description_key_id, description_item in description_candidates:
         try:
             description = _pipeline_description(
@@ -3678,11 +3516,15 @@ async def generate_output_image(
                 f"{description_item.get('display_name', description_key_id)}: {exc}"
             )
 
+    # Always return a visible description string even if every selected AI
+    # provider refuses the vision-description request. This fallback describes
+    # the generated asset from the user's actual request rather than inventing
+    # visual details.
     if not description:
         description = (
             f"Generated image based on the requested content: {prompt.strip()}"
             if prompt.strip()
-            else "Generated image created successfully from the selected references."
+            else "Generated image created successfully from the selected reference."
         )
 
     return {
@@ -3694,8 +3536,6 @@ async def generate_output_image(
         "api_id": key_id,
         "pipeline_api_id": key_id,
         "selected_api_count": len(API_KEY_STATE.get("selected_ids", [])),
-        "reference_count": len(reference_paths),
-        "reference_names": [label.split(": ", 1)[-1] for label in reference_labels],
         "description": description,
         "description_provider": (
             item.get("display_name", "Selected API")
@@ -3821,6 +3661,111 @@ def get_generated_image(filename: str):
     path=IMAGE_OUTPUT_DIR/Path(filename).name
     if not path.exists(): raise HTTPException(status_code=404, detail="Generated image was not found.")
     return FileResponse(path,media_type="image/png",filename=path.name)
+
+
+# -------------------------------------------------------------------
+# Canva Connect integration
+# -------------------------------------------------------------------
+
+@app.get("/api/canva/connect/oauth/status")
+async def canva_connect_oauth_status():
+    """Return Canva Connect configuration/authentication status."""
+    try:
+        return await canva_connect_service.status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/canva/connect/oauth/start")
+async def canva_connect_oauth_start():
+    """Create the Canva OAuth authorization URL and return it to the frontend."""
+    try:
+        return {
+            "success": True,
+            "authorization_url": canva_connect_service.authorization_url(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/canva/connect/oauth/callback")
+async def canva_connect_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Receive Canva's OAuth callback and exchange the authorization code."""
+    if error:
+        import html
+        message = html.escape(error_description or error)
+        return HTMLResponse(
+            f"<h2>Canva connection failed</h2><p>{message}</p>",
+            status_code=400,
+        )
+
+    if not code:
+        return HTMLResponse(
+            "<h2>Canva connection failed</h2><p>No authorization code was returned.</p>",
+            status_code=400,
+        )
+
+    try:
+        await canva_connect_service.exchange_code(code, state)
+        return HTMLResponse(
+            "<h2>Canva connected successfully</h2>"
+            "<p>You can close this window and return to the Image Generator.</p>",
+            status_code=200,
+        )
+    except Exception as exc:
+        import html
+        message = html.escape(str(exc))
+        return HTMLResponse(
+            f"<h2>Canva connection failed</h2><p>{message}</p>",
+            status_code=400,
+        )
+
+
+@app.post("/api/canva/create-from-generated-image")
+async def canva_create_from_generated_image(
+    filename: str = Form(...),
+    design_type: str = Form("poster"),
+):
+    """Upload the generated image to Canva and return its editable design URL."""
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Generated image filename is required.")
+
+    local_path = IMAGE_OUTPUT_DIR / safe_name
+    if not local_path.exists() or not local_path.is_file():
+        raise HTTPException(status_code=404, detail="Generated image was not found on the server.")
+
+    try:
+        result = await canva_connect_service.create_editable_design_from_local_image(local_path)
+        return {
+            **result,
+            "design_type": design_type,
+            "message": result.get(
+                "message",
+                "The generated image was uploaded to Canva and placed in a Canva design. Open it to edit.",
+            ),
+        }
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        status = 401 if any(
+            phrase in lowered
+            for phrase in (
+                "not authorized",
+                "not configured",
+                "authorization",
+                "oauth",
+                "connect first",
+                "reconnect canva",
+                "canva connect is not authorized",
+            )
+        ) else 502
+        raise HTTPException(status_code=status, detail=message) from exc
 
 
 @app.post("/api/images/save-to-drive")
