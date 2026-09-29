@@ -18,7 +18,8 @@ import type {
   GenerateTemplateResponse,
 } from "./services/templateService";
 
-
+const CANVA_DEPLOYMENT_TEST_2026 = "CANVA_DEPLOYMENT_TEST_2026";
+console.log(CANVA_DEPLOYMENT_TEST_2026);
 const API_BASE_URL = "http://localhost:8000";
 
 
