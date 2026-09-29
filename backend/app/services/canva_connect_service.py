@@ -26,11 +26,10 @@ class CanvaConnectService:
     ).strip()
 
     SCOPES = [
-        "asset:write",
-        "design:content:write",
-        "design:content:read",
-        "design:meta:read",
-    ]
+    "asset:read",
+    "asset:write",
+    "design:content:write",
+]
 
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
