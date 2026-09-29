@@ -1,4 +1,3 @@
-// CANVA_DEPLOYMENT_TEST_2026
 import {
   useEffect,
   useRef,
@@ -13,14 +12,15 @@ import type {
 
 import "./App.css";
 
-import { generateTemplate } from "./services/templateService";
 import type {
   GenerateTemplateResponse,
 } from "./services/templateService";
 
-const CANVA_DEPLOYMENT_TEST_2026 = "CANVA_DEPLOYMENT_TEST_2026";
-console.log(CANVA_DEPLOYMENT_TEST_2026);
-const API_BASE_URL = "http://localhost:8000";
+
+const API_BASE_URL =
+  window.location.hostname.includes("railway.app")
+    ? "https://agentic-content-generator-production.up.railway.app"
+    : "http://localhost:8000";
 
 
 function resolveApiUrl(url: string): string {
@@ -155,34 +155,6 @@ function isImageUrl(url: string): boolean {
     );
   } catch {
     return false;
-  }
-}
-
-
-function formatReferenceType(
-  type: ReferenceType,
-): string {
-  switch (type) {
-    case "image":
-      return "Image";
-
-    case "gif":
-      return "GIF";
-
-    case "pdf":
-      return "PDF";
-
-    case "video":
-      return "Video";
-
-    case "youtube":
-      return "YouTube";
-
-    case "image-link":
-      return "Image Link";
-
-    default:
-      return "Reference";
   }
 }
 
@@ -1458,7 +1430,6 @@ function getApiServiceIcon(
 
 function ImageGenerator({
   selectedApiKeys,
-  selectedApiServices,
   availableApiServices,
   onApiSelectionChange,
   onBackToApiSetup,
@@ -1494,9 +1465,6 @@ function ImageGenerator({
     useState<"manual" | "ai">(
       "manual",
     );
-
-  const [isGeneratingPrompt, setIsGeneratingPrompt] =
-    useState(false);
 
   const [templateResult, setTemplateResult] =
     useState<GenerateTemplateResponse | null>(
@@ -2908,172 +2876,9 @@ function ImageGenerator({
 
   /*
    * ------------------------------------------------------------
-   * Remove reference
-   * ------------------------------------------------------------
-   */
-
-  function handleRemoveReference() {
-
-    if (
-      reference?.source ===
-        "upload" &&
-      reference.url.startsWith(
-        "blob:",
-      )
-    ) {
-
-      URL.revokeObjectURL(
-        reference.url,
-      );
-    }
-
-
-    setReference(
-      null,
-    );
-
-    setSelectedInputIds([]);
-
-    setTemplatePrompt(
-      "",
-    );
-
-    setPromptMode(
-      "manual",
-    );
-
-    setTemplateResult(
-      null,
-    );
-
-    setGeneratedImageUrl("");
-    setGeneratedImageFilename("");
-    setGeneratedImageDescription("");
-    setSocialDescriptions({});
-    setSocialDescriptionFilename("");
-    setSocialDescriptionPreviewContent("");
-    setSocialDescriptionSaved(false);
-    setSocialDescriptionSaveMessage("");
-    setIsSocialDescriptionPreviewOpen(false);
-    setGeneratedImageModel("");
-
-    setError("");
-  }
-
-
-  /*
-   * ------------------------------------------------------------
    * Automatic template generation
    * ------------------------------------------------------------
    */
-
-  async function generateTemplateForReference(
-    currentReference: ReferenceData,
-  ) {
-
-    if (selectedApiKeys.length === 0) {
-      setTemplateResult(null);
-      setTemplateApiProvider("");
-      setTemplateApiModel("");
-      return;
-    }
-
-    if (
-      currentReference.type ===
-        "pdf" ||
-      currentReference.type ===
-        "video"
-    ) {
-
-      setTemplateResult(
-        null,
-      );
-
-
-      setError(
-        "Template generation currently supports images, GIFs and YouTube references.",
-      );
-
-
-      return;
-    }
-
-
-    setError("");
-
-    setIsGeneratingTemplate(
-      true,
-    );
-
-    setTemplateResult(
-      null,
-    );
-    setTemplateApiProvider("");
-    setTemplateApiModel("");
-
-
-    try {
-
-      const result =
-        await generateTemplate({
-          type:
-            currentReference.type,
-
-          name:
-            currentReference.name,
-
-          /*
-           * `url` is only the browser preview URL.
-           * `sourceId` is the value the backend uses to locate the
-           * actual reference.
-           */
-          url:
-            currentReference.url,
-
-          source:
-            currentReference.source as any,
-
-          sourceId:
-            currentReference.sourceId,
-
-          mimeType:
-            currentReference.mimeType,
-        });
-
-
-      setTemplateResult(
-        result,
-      );
-
-      const templateMetadata = result as GenerateTemplateResponse & {
-        provider?: string;
-        model?: string;
-      };
-      setTemplateApiProvider(String(templateMetadata.provider || ""));
-      setTemplateApiModel(String(templateMetadata.model || ""));
-
-    } catch (err) {
-
-      console.error(
-        "Automatic template generation failed:",
-        err,
-      );
-
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Unable to generate template from the reference.",
-      );
-
-    } finally {
-
-      setIsGeneratingTemplate(
-        false,
-      );
-    }
-  }
-
 
   /*
    * ------------------------------------------------------------
@@ -3085,19 +2890,6 @@ function ImageGenerator({
    */
 
 
-  /*
-   * ------------------------------------------------------------
-   * Generate AI prompt
-   * ------------------------------------------------------------
-   */
-
-  function handleGeneratePrompt() {
-    setIsGeneratingPrompt(false);
-    setPromptMode("manual");
-    setPromptApiProvider("");
-    setPromptApiModel("");
-    setError("AI prompt generation is temporarily disabled. Enter the content prompt manually.");
-  }
 
   /*
    * ------------------------------------------------------------
@@ -3247,6 +3039,9 @@ function ImageGenerator({
       }
 
       const firstReference = selectedReferences[0];
+      if (!firstReference) {
+        throw new Error("At least one reference image is required.");
+      }
       const formData = new FormData();
       formData.append("source_type", firstReference.source_type);
       formData.append("source", firstReference.source);
@@ -5523,10 +5318,10 @@ const handleOpenGeneratedImageInCanva = async () => {
                   </span>
                 </div>
 
-                {templateResult.template.text_groups &&
-                templateResult.template.text_groups.length > 0 ? (
+                {templateResult!.template.text_groups &&
+                templateResult!.template.text_groups.length > 0 ? (
                   <div className="editable-text-list">
-                    {(Array.isArray(templateResult.template.text_groups) ? templateResult.template.text_groups : []).map((group) => (
+                    {(Array.isArray(templateResult!.template.text_groups) ? templateResult!.template.text_groups : []).map((group) => (
                       <div
                         key={group.id}
                         className="editable-text-item"
@@ -5548,10 +5343,10 @@ const handleOpenGeneratedImageInCanva = async () => {
                       </div>
                     ))}
                   </div>
-                ) : templateResult.template.text_elements &&
-                  templateResult.template.text_elements.length > 0 ? (
+                ) : templateResult!.template.text_elements &&
+                  templateResult!.template.text_elements.length > 0 ? (
                   <div className="editable-text-list">
-                    {(Array.isArray(templateResult.template.text_elements) ? templateResult.template.text_elements : []).map((element) => (
+                    {(Array.isArray(templateResult!.template.text_elements) ? templateResult!.template.text_elements : []).map((element) => (
                       <div
                         key={element.id}
                         className="editable-text-item"
@@ -6027,56 +5822,25 @@ const handleOpenGeneratedImageInCanva = async () => {
                 )}
 
                 
-{generatedImageUrl && (
-  <div
-    style={{
-      display: "flex",
-      gap: "10px",
-      flexWrap: "wrap",
-      marginTop: "16px",
-    }}
-  >
-    <button
-      type="button"
-      className="secondary-button"
-      onClick={handleOpenGeneratedImageInCanva}
-      disabled={isCreatingCanvaDesign}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: "8px",
-      }}
-    >
-      {isCreatingCanvaDesign
-        ? "Opening Canva..."
-        : "🎨 EDIT IN CANVA TEST"}
-    </button>
-  </div>
-)}
-<button
-  type="button"
-  onClick={handleOpenGeneratedImageInCanva}
-  disabled={!generatedImageFilename || isCreatingCanvaDesign}
+<div
   style={{
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: "8px",
-    minHeight: "42px",
-    padding: "10px 18px",
-    borderRadius: "10px",
-    border: "1px solid rgba(123, 92, 255, 0.45)",
-    background: isCreatingCanvaDesign
-      ? "rgba(123, 92, 255, 0.25)"
-      : "linear-gradient(135deg, #7b4dff, #4f8cff)",
-    color: "#fff",
-    fontWeight: 800,
-    cursor: "pointer",
+    display: "flex",
+    gap: "10px",
+    flexWrap: "wrap",
+    marginTop: "16px",
   }}
 >
-  🎨 {isCreatingCanvaDesign ? "Opening Canva..." : "Edit in Canva"}
-</button>
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={handleOpenGeneratedImageInCanva}
+    disabled={isCreatingCanvaDesign}
+  >
+    {isCreatingCanvaDesign
+      ? "Opening Canva..."
+      : "🎨 Edit in Canva"}
+  </button>
+</div>
 
 {canvaMessage && (
   <div
