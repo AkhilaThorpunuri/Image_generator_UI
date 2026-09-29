@@ -3791,7 +3791,7 @@ def _canva_frontend_url() -> str:
     configured = str(os.getenv(CANVA_FRONTEND_URL_ENV, "") or "").strip()
     if configured:
         return configured.rstrip("/")
-    return "http://localhost:5173"
+    return "https://imagegeneratorui-production.up.railway.app"
 
 
 def _canva_configured() -> bool:
