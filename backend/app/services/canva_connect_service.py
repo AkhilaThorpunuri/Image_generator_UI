@@ -19,7 +19,7 @@ class CanvaConnectService:
     AUTHORIZE_URL = "https://www.canva.com/api/oauth/authorize"
     REDIRECT_URI = os.getenv(
         "CANVA_CONNECT_REDIRECT_URI",
-        "http://127.0.0.1:8000/api/canva/connect/oauth/callback",
+        "https://agentic-content-generator-production.up.railway.app/api/canva/connect/oauth/callback",
     ).strip()
 
     # These are the Connect permissions required by this application:
