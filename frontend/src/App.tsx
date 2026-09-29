@@ -1477,10 +1477,10 @@ function ImageGenerator({
   const [templateApiModel, setTemplateApiModel] =
     useState("");
 
-  const [promptApiProvider, setPromptApiProvider] =
+  const [promptApiProvider] =
     useState("");
 
-  const [promptApiModel, setPromptApiModel] =
+  const [promptApiModel] =
     useState("");
 
   const [generatedImageUrl, setGeneratedImageUrl] =
@@ -1551,7 +1551,7 @@ function ImageGenerator({
   const [isTaggingImages, setIsTaggingImages] =
     useState(false);
 
-  const [isGeneratingTemplate, setIsGeneratingTemplate] =
+  const [isGeneratingTemplate] =
     useState(false);
 
   const [previewUrls, setPreviewUrls] =
@@ -5288,90 +5288,6 @@ const handleOpenGeneratedImageInCanva = async () => {
               </div>
 
             </div>
-
-
-            {false && templateResult && (
-              <div className="generated-output-meta" style={{ marginTop: "16px" }}>
-                <span>API Provider</span>
-                <strong>{templateApiProvider || "Selected API"}</strong>
-                <span>Model</span>
-                <strong>{templateApiModel || "Provider model"}</strong>
-              </div>
-            )}
-
-
-            {false && templateResult && (
-              <div className="template-editable-section">
-
-                <div className="template-structure-heading">
-                  <div>
-                    <span className="template-section-number">
-                      04
-                    </span>
-                    <strong>
-                      Editable Text Groups
-                    </strong>
-                  </div>
-
-                  <span>
-                    Existing text regions that can be replaced
-                  </span>
-                </div>
-
-                {templateResult!.template.text_groups &&
-                templateResult!.template.text_groups.length > 0 ? (
-                  <div className="editable-text-list">
-                    {(Array.isArray(templateResult!.template.text_groups) ? templateResult!.template.text_groups : []).map((group) => (
-                      <div
-                        key={group.id}
-                        className="editable-text-item"
-                      >
-                        <div
-                          className="editable-text-swatch"
-                          style={{
-                            backgroundColor:
-                              group.lines?.[0]?.color ||
-                              "#FFFFFF",
-                          }}
-                        />
-                        <div className="editable-text-copy">
-                          <strong>{group.text}</strong>
-                          <span>
-                            {group.role} · {group.line_count} line{group.line_count === 1 ? "" : "s"}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : templateResult!.template.text_elements &&
-                  templateResult!.template.text_elements.length > 0 ? (
-                  <div className="editable-text-list">
-                    {(Array.isArray(templateResult!.template.text_elements) ? templateResult!.template.text_elements : []).map((element) => (
-                      <div
-                        key={element.id}
-                        className="editable-text-item"
-                      >
-                        <div
-                          className="editable-text-swatch"
-                          style={{ backgroundColor: element.color }}
-                        />
-                        <div className="editable-text-copy">
-                          <strong>{element.text}</strong>
-                          <span>
-                            {element.id} · {element.width} × {element.height}px
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="editable-text-empty">
-                    No editable text regions were detected. Make sure Gemini is configured and regenerate the template.
-                  </div>
-                )}
-
-              </div>
-            )}
 
 
             <div className="template-prompt-area">
