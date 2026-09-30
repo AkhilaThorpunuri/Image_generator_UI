@@ -2175,50 +2175,70 @@ def api_key_status():
 def get_drive_folders():
     """Return the configured Google Drive output folder."""
 
-    output_folder_id = normalize_drive_folder_id(
-        str(os.getenv(DRIVE_OUTPUT_FOLDER_ENV, "") or "")
-    )
-
-    if not output_folder_id:
-        raise HTTPException(
-            status_code=500,
-            detail="GOOGLE_DRIVE_OUTPUT_FOLDER_ID is not configured.",
-        )
+    folder_id, folder_name = require_drive_configuration()
 
     try:
         service = get_drive_service()
 
-        metadata = service.files().get(
-            fileId=output_folder_id,
+        resolved_parent_id = resolve_drive_folder_id(
+            service,
+            folder_id,
+            folder_name,
+        )
+
+        configured_output_id = get_configured_output_folder_id()
+
+        output_metadata = service.files().get(
+            fileId=configured_output_id,
             fields="id,name",
         ).execute()
 
-        output_folder_name = str(
-            metadata.get("name") or "Google Drive output folder"
+        output_name = str(
+            output_metadata.get("name")
+            or "Google Drive output folder"
         )
 
-        API_KEY_STATE["drive_output_folder_id"] = output_folder_id
-        API_KEY_STATE["drive_output_folder_name"] = output_folder_name
+        API_KEY_STATE["drive_folder_id"] = resolved_parent_id
+        API_KEY_STATE["drive_folder_name"] = str(
+            folder_name or ""
+        ).strip()
+
+        API_KEY_STATE["drive_output_folder_id"] = (
+            configured_output_id
+        )
+
+        API_KEY_STATE["drive_output_folder_name"] = (
+            output_name
+        )
+
         persist_drive_configuration()
 
         return {
             "success": True,
             "folders": [
-    {
-        "id": configured_output_id,
-        "name": output_name,
-        "label": output_name,
-    }
-]
+                {
+                    "id": configured_output_id,
+                    "name": output_name,
+                    "label": output_name,
+                }
+            ],
         }
 
     except HTTPException:
         raise
+
     except Exception as exc:
-        print("Google Drive output folder loading failed:", repr(exc))
+        print(
+            "Google Drive folder loading failed:",
+            repr(exc),
+        )
+
         raise HTTPException(
             status_code=500,
-            detail=f"Unable to load configured Google Drive output folder: {exc}",
+            detail=(
+                "Unable to load configured Google Drive "
+                f"output folders: {exc}"
+            ),
         ) from exc
 
 
