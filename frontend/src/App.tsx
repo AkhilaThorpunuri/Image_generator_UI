@@ -3081,11 +3081,10 @@ function ImageGenerator({
 
       setGeneratedImageUrl(resolveApiUrl(data.image_url));
       setGeneratedImageFilename(String(data.filename || ""));
-      setGeneratedImageDescription(
-        typeof data?.description === "string" && data.description.trim()
-          ? data.description.trim()
-          : `Generated image based on the selected ${selectedReferences.length} reference image${selectedReferences.length === 1 ? "" : "s"} and prompt: ${templatePrompt.trim()}`,
-      );
+      // Do not display or expose the backend's automatic image description.
+     // Social-media descriptions are generated separately through
+     // "Generate Description" and are shown only through "Preview".
+      setGeneratedImageDescription("");
       setGeneratedImageModel(String(data.model || ""));
       setGeneratedImageProvider(String(data.provider || ""));
       setGeneratedImageSaved(false);
@@ -5752,38 +5751,6 @@ const handleOpenGeneratedImageInCanva = async () => {
                   Generated Image
                 </h3>
 
-                {generatedImageDescription && (
-                  <div
-                    className="generated-output-description"
-                    style={{
-                      marginTop: "12px",
-                      padding: "12px 14px",
-                      borderRadius: "12px",
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      background: "rgba(255,255,255,0.035)",
-                    }}
-                  >
-                    <span
-                      style={{
-                        display: "block",
-                        fontSize: "12px",
-                        fontWeight: 700,
-                        opacity: 0.7,
-                        marginBottom: "5px",
-                      }}
-                    >
-                      Description
-                    </span>
-                    <p
-                      style={{
-                        margin: 0,
-                        lineHeight: 1.5,
-                      }}
-                    >
-                      {generatedImageDescription}
-                    </p>
-                  </div>
-                )}
 
                 <p>
                   The selected reference images are synthesized into one
