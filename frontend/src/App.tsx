@@ -6206,163 +6206,121 @@ const handleOpenGeneratedImageInCanva = async () => {
 
 
       {isSocialDescriptionPreviewOpen && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={() =>
-            setIsSocialDescriptionPreviewOpen(false)
-          }
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 1000,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "24px",
-            background: "rgba(0,0,0,0.72)",
-          }}
-        >
+  <div
+    className="modal-backdrop"
+    onMouseDown={() =>
+      setIsSocialDescriptionPreviewOpen(false)
+    }
+    style={{
+      position: "fixed",
+      inset: 0,
+      zIndex: 1000,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: "24px",
+      background: "rgba(0,0,0,0.72)",
+    }}
+  >
+    <div
+      onMouseDown={(event) =>
+        event.stopPropagation()
+      }
+      style={{
+        width: "min(900px, 100%)",
+        maxHeight: "85vh",
+        overflowY: "auto",
+        borderRadius: "16px",
+        border:
+          "1px solid rgba(255,255,255,0.12)",
+        background: "#15151a",
+        padding: "20px",
+        boxShadow:
+          "0 24px 80px rgba(0,0,0,0.45)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          marginBottom: "16px",
+        }}
+      >
+        <div>
           <div
-            onMouseDown={(event) =>
-              event.stopPropagation()
-            }
+            className="section-kicker"
             style={{
-              width: "min(900px, 100%)",
-              maxHeight: "85vh",
-              overflowY: "auto",
-              borderRadius: "16px",
-              border:
-                "1px solid rgba(255,255,255,0.12)",
-              background: "#15151a",
-              padding: "20px",
-              boxShadow:
-                "0 24px 80px rgba(0,0,0,0.45)",
+              fontSize: "11px",
+              fontWeight: 800,
+              opacity: 0.7,
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "12px",
-                marginBottom: "16px",
-              }}
-            >
-              <div>
-                <div
-                  className="section-kicker"
-                  style={{
-                    fontSize: "11px",
-                    fontWeight: 800,
-                    opacity: 0.7,
-                  }}
-                >
-                  PREVIEW
-                </div>
-                <h2 style={{ margin: "4px 0 0" }}>
-                  Social Media Descriptions
-                </h2>
-              </div>
+            PREVIEW
+          </div>
 
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() =>
-                  setIsSocialDescriptionPreviewOpen(
-                    false,
-                  )
-                }
-              >
-                Close
-              </button>
-            </div>
+          <h2 style={{ margin: "4px 0 0" }}>
+            Social Media Descriptions
+          </h2>
+        </div>
 
-            {socialDescriptionPreviewContent && (
-              <article
-                style={{
-                  padding: "14px",
-                  borderRadius: "12px",
-                  border: "1px solid rgba(255,255,255,0.10)",
-                  background: "rgba(255,255,255,0.035)",
-                }}
-              >
-                <strong>Generated Description File</strong>
-                {socialDescriptionFilename && (
-                  <div style={{ marginTop: "5px", fontSize: "12px", opacity: 0.65 }}>
-                    {socialDescriptionFilename}
-                  </div>
-                )}
-                <p
-                  style={{
-                    margin: "10px 0 0",
-                    whiteSpace: "pre-wrap",
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {socialDescriptionPreviewContent}
-                </p>
-              </article>
-            )}
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() =>
+            setIsSocialDescriptionPreviewOpen(false)
+          }
+        >
+          Close
+        </button>
+      </div>
 
-            <div
-              style={{
-                display: "grid",
-                gap: "12px",
-              }}
-            >
-              {(Object.entries(socialDescriptions) as Array<[string, SocialDescriptionItem]>).map(([platform, item]) => (
-                <article
-                  key={platform}
-                  style={{
-                    padding: "14px",
-                    borderRadius: "12px",
-                    border: "1px solid rgba(255,255,255,0.10)",
-                    background: "rgba(255,255,255,0.035)",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <span style={{ fontSize: "20px" }}>{item.icon || "✦"}</span>
-                      <strong>{platform}</strong>
-                    </div>
-                    <span style={{ opacity: 0.72, fontSize: "12px", fontWeight: 700 }}>
-                      {item.word_count} words
-                      {item.target_word_count ? ` / ${item.target_word_count} target` : ""}
-                    </span>
-                  </div>
+      <article
+        style={{
+          padding: "16px",
+          borderRadius: "12px",
+          border:
+            "1px solid rgba(255,255,255,0.10)",
+          background:
+            "rgba(255,255,255,0.035)",
+        }}
+      >
+        <strong
+          style={{
+            display: "block",
+            fontSize: "14px",
+            marginBottom: "6px",
+          }}
+        >
+          Generated Description
+        </strong>
 
-                  <p style={{ margin: "12px 0 0", whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
-                    {item.text}
-                  </p>
+        {socialDescriptionFilename && (
+          <div
+            style={{
+              marginBottom: "14px",
+              fontSize: "12px",
+              opacity: 0.65,
+            }}
+          >
+            {socialDescriptionFilename}
+          </div>
+        )}
 
-                  {item.company_tags && item.company_tags.length > 0 && (
-                    <div style={{ marginTop: "12px" }}>
-                      <strong style={{ fontSize: "11px", opacity: 0.72 }}>Company Tags</strong>
-                      <div style={{ marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                        {item.company_tags.map((tag) => (
-                          <span key={tag} style={{ padding: "4px 7px", borderRadius: "999px", background: "rgba(120,100,255,0.14)", fontSize: "11px" }}>
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {item.tags && item.tags.length > 0 && (
-                    <div style={{ marginTop: "10px" }}>
-                      <strong style={{ fontSize: "11px", opacity: 0.72 }}>Tags</strong>
-                      <div style={{ marginTop: "6px", display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                        {item.tags.map((tag) => (
-                          <span key={tag} style={{ padding: "4px 7px", borderRadius: "999px", background: "rgba(255,255,255,0.06)", fontSize: "11px" }}>
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </article>
-              ))}
-            </div>
+        <div
+          style={{
+            whiteSpace: "pre-wrap",
+            lineHeight: 1.65,
+            fontSize: "14px",
+          }}
+        >
+          {socialDescriptionPreviewContent}
+        </div>
+      </article>
+    </div>
+  </div>
+)}
 
             <div
               style={{
