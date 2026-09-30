@@ -1428,6 +1428,62 @@ function getApiServiceIcon(
   );
 }
 
+function cleanSocialTag(value: unknown): string {
+  const tag = String(value || "").trim();
+  if (!tag) return "";
+  return tag.startsWith("#") ? tag : `#${tag.replace(/^#+/, "")}`;
+}
+
+function normalizeSocialTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(cleanSocialTag)
+    .filter(Boolean)
+    .filter((tag, index, list) => list.indexOf(tag) === index);
+}
+
+function buildFallbackTopicHashtags(prompt: string, description: string): string[] {
+  const source = `${prompt} ${description}`.toLowerCase();
+  const stopWords = new Set([
+    "this", "that", "with", "from", "into", "about", "have", "has",
+    "will", "your", "their", "there", "where", "which", "what", "when",
+    "while", "using", "used", "make", "made", "show", "shows", "image",
+    "create", "created", "content", "post", "social", "media", "the", "and",
+    "for", "are", "you", "our", "its", "not", "but", "can", "all", "one",
+    "two", "new", "more", "very", "also", "than", "then", "they", "them",
+    "their", "a", "an", "to", "of", "in", "on", "at", "by", "is", "it",
+    "be", "as", "or", "if", "we", "i", "me", "my", "how", "why", "do",
+  ]);
+
+  const candidates = source.match(/[a-z][a-z0-9+#.-]{2,}/g) || [];
+  const tags: string[] = [];
+
+  for (const word of candidates) {
+    const normalized = word.replace(/^[^a-z]+|[^a-z0-9]+$/g, "");
+    if (!normalized || stopWords.has(normalized)) continue;
+    if (/^https?$/.test(normalized)) continue;
+    const tag = `#${normalized.replace(/[^a-z0-9]/gi, "")}`;
+    if (tag.length < 4 || tag.length > 40) continue;
+    if (!tags.includes(tag)) tags.push(tag);
+    if (tags.length >= 8) break;
+  }
+
+  const defaults = ["#Technology", "#Innovation", "#DigitalContent"];
+  for (const fallback of defaults) {
+    if (tags.length >= 8) break;
+    if (!tags.includes(fallback)) tags.push(fallback);
+  }
+
+  return tags.slice(0, 8);
+}
+
+function extractExplicitCompanyTags(prompt: string): string[] {
+  // Only treat explicitly supplied hashtags as company/brand tags.
+  // Do not invent a company name from ordinary prompt words.
+  const explicit = prompt.match(/#[A-Za-z0-9_]+/g) || [];
+  return normalizeSocialTags(explicit).slice(0, 5);
+}
+
 function ImageGenerator({
   selectedApiKeys,
   availableApiServices,
@@ -1500,7 +1556,6 @@ function ImageGenerator({
     target_word_count?: number;
     minimum_word_count?: number;
     maximum_word_count?: number;
-    icon?: string;
     company_tags?: string[];
     tags?: string[];
   };
@@ -1508,8 +1563,6 @@ function ImageGenerator({
   const [socialDescriptions, setSocialDescriptions] =
     useState<Record<string, SocialDescriptionItem>>({});
   const [socialDescriptionFilename, setSocialDescriptionFilename] =
-    useState("");
-  const [socialDescriptionPreviewContent, setSocialDescriptionPreviewContent] =
     useState("");
   const [isGeneratingSocialDescriptions, setIsGeneratingSocialDescriptions] =
     useState(false);
@@ -2308,7 +2361,6 @@ function ImageGenerator({
     setGeneratedImageDescription("");
     setSocialDescriptions({});
     setSocialDescriptionFilename("");
-    setSocialDescriptionPreviewContent("");
     setSocialDescriptionSaved(false);
     setSocialDescriptionSaveMessage("");
     setIsSocialDescriptionPreviewOpen(false);
@@ -3393,6 +3445,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     }
 
     setIsGeneratingSocialDescriptions(true);
+    // Generation must NEVER open the preview or display generated text.
     setIsSocialDescriptionPreviewOpen(false);
     setSocialDescriptionError("");
     setSocialDescriptionSaved(false);
@@ -3425,60 +3478,66 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setSocialDescriptionFilename(
-  String(data?.social_media_filename || ""),
-);
+        String(data?.social_media_filename || ""),
+      );
 
-// IMPORTANT:
-// Do NOT put generated content into the preview state here.
-// The description must remain hidden until Preview is clicked.
-setSocialDescriptionPreviewContent("");
+      const promptCompanyTags = extractExplicitCompanyTags(
+        templatePrompt.trim(),
+      );
 
-      if (
-        data?.descriptions &&
-        typeof data.descriptions === "object"
-      ) {
-        const normalizedDescriptions: Record<string, SocialDescriptionItem> = {};
-        Object.entries(data.descriptions as Record<string, any>).forEach(([platform, value]) => {
+      const returnedDescriptions =
+        data?.descriptions && typeof data.descriptions === "object"
+          ? data.descriptions as Record<string, any>
+          : null;
+
+      const normalizedDescriptions: Record<string, SocialDescriptionItem> = {};
+
+      if (returnedDescriptions) {
+        Object.entries(returnedDescriptions).forEach(([platform, value]) => {
           const item = value && typeof value === "object" ? value : {};
           const text = String(item.text || item.content || "").trim();
+
+          const companyTags = normalizeSocialTags(
+            item.company_tags ?? data?.company_tags,
+          );
+
+          const topicTags = normalizeSocialTags(
+            item.tags ?? item.hashtags ?? item.topic_hashtags,
+          );
+
           normalizedDescriptions[platform] = {
-  text,
-  character_count: Number(
-    item.character_count || text.length,
-  ),
-  character_limit: Number(
-    item.character_limit || 0,
-  ),
-  word_count: Number(
-    item.word_count ||
-      text.split(/\s+/).filter(Boolean).length,
-  ),
-  target_word_count:
-    Number(item.target_word_count || 0) || undefined,
-  minimum_word_count:
-    Number(item.minimum_word_count || 0) || undefined,
-  maximum_word_count:
-    Number(item.maximum_word_count || 0) || undefined,
-
-  // Icons are metadata only.
-  // They must NEVER be displayed as the description.
-  company_tags: Array.isArray(item.company_tags)
-    ? item.company_tags
-        .map((tag: unknown) => String(tag).trim())
-        .filter(Boolean)
-    : [],
-
-  tags: Array.isArray(item.tags)
-    ? item.tags
-        .map((tag: unknown) => String(tag).trim())
-        .filter(Boolean)
-    : [],
-};
+            text,
+            character_count: Number(
+              item.character_count || text.length,
+            ),
+            character_limit: Number(
+              item.character_limit || 0,
+            ),
+            word_count: Number(
+              item.word_count ||
+                text.split(/\s+/).filter(Boolean).length,
+            ),
+            target_word_count:
+              Number(item.target_word_count || 0) || undefined,
+            minimum_word_count:
+              Number(item.minimum_word_count || 0) || undefined,
+            maximum_word_count:
+              Number(item.maximum_word_count || 0) || undefined,
+            company_tags:
+              companyTags.length > 0
+                ? companyTags
+                : promptCompanyTags,
+            tags:
+              topicTags.length > 0
+                ? topicTags
+                : buildFallbackTopicHashtags(
+                    templatePrompt.trim(),
+                    text,
+                  ),
+          };
         });
-        setSocialDescriptions(normalizedDescriptions);
       } else {
-        const rawContent =
-          String(data?.content || "").trim();
+        const rawContent = String(data?.content || "").trim();
 
         const limits: Record<string, number> = {
           "[LINKEDIN]": 3000,
@@ -3489,88 +3548,65 @@ setSocialDescriptionPreviewContent("");
 
         const headings = Object.keys(limits);
 
-        const parsed: Record<
-          string,
-          SocialDescriptionItem
-        > = {};
-
         headings.forEach((heading, index) => {
-          const startIndex =
-            rawContent.indexOf(heading);
+          const startIndex = rawContent.indexOf(heading);
+          if (startIndex < 0) return;
 
-          if (startIndex < 0) {
-            return;
-          }
-
-          const contentStart =
-            startIndex + heading.length;
-
+          const contentStart = startIndex + heading.length;
           const nextPositions = headings
             .slice(index + 1)
             .map((nextHeading) =>
-              rawContent.indexOf(
-                nextHeading,
-                contentStart,
-              ),
+              rawContent.indexOf(nextHeading, contentStart),
             )
-            .filter(
-              (position) => position >= 0,
-            );
+            .filter((position) => position >= 0);
 
           const endIndex =
             nextPositions.length > 0
               ? Math.min(...nextPositions)
               : rawContent.length;
 
-          const content =
-            rawContent
-              .slice(
-                contentStart,
-                endIndex,
-              )
-              .trim();
+          const content = rawContent
+            .slice(contentStart, endIndex)
+            .trim();
 
-          const platform =
-            heading
-              .replace(/^\[|\]$/g, "")
-              .replace(
-                "X / TWITTER",
-                "X / Twitter",
-              )
-              .replace(
-                "LINKEDIN",
-                "LinkedIn",
-              )
-              .replace(
-                "FACEBOOK",
-                "Facebook",
-              )
-              .replace(
-                "INSTAGRAM",
-                "Instagram",
-              );
+          const platform = heading
+            .replace(/^\[|\]$/g, "")
+            .replace("X / TWITTER", "X / Twitter")
+            .replace("LINKEDIN", "LinkedIn")
+            .replace("FACEBOOK", "Facebook")
+            .replace("INSTAGRAM", "Instagram");
 
-          if (content) {
-            parsed[platform] = {
-              text: content,
-              character_count: content.length,
-              character_limit: limits[heading],
-              word_count: content.split(/\s+/).filter(Boolean).length,
-              icon: "✦",
-              company_tags: [],
-              tags: (content.match(/#[A-Za-z0-9_]+/g) || []).slice(0, 8),
-            };
-          }
-        });
+          if (!content) return;
 
-        if (!Object.keys(parsed).length) {
-          throw new Error(
-            "The selected API returned no recognizable social media descriptions.",
+          const contentTags = normalizeSocialTags(
+            content.match(/#[A-Za-z0-9_]+/g) || [],
           );
-        }
 
-        setSocialDescriptions(parsed);
+          normalizedDescriptions[platform] = {
+            text: content,
+            character_count: content.length,
+            character_limit: limits[heading],
+            word_count: content.split(/\s+/).filter(Boolean).length,
+            company_tags: promptCompanyTags,
+            tags:
+              contentTags.length > 0
+                ? contentTags
+                : buildFallbackTopicHashtags(
+                    templatePrompt.trim(),
+                    content,
+                  ),
+          };
+        });
       }
+
+      if (!Object.keys(normalizedDescriptions).length) {
+        throw new Error(
+          "The selected API returned no recognizable social media descriptions.",
+        );
+      }
+
+      // Store the generated result silently. Nothing is rendered here.
+      setSocialDescriptions(normalizedDescriptions);
 
       if (!String(data?.social_media_filename || "").trim()) {
         setSocialDescriptionFilename(
@@ -3578,6 +3614,7 @@ setSocialDescriptionPreviewContent("");
         );
       }
 
+      // Keep Preview closed after Generate.
       setIsSocialDescriptionPreviewOpen(false);
     } catch (error) {
       console.error(
@@ -5894,8 +5931,12 @@ setSocialDescriptionPreviewContent("");
 )}
 
 {/* ======================================================
-    POST-IMAGE DESCRIPTION — kept separate from
-    template/prompt generation.
+    SOCIAL MEDIA DESCRIPTION
+    ------------------------------------------------------
+    Required flow:
+      1. Generate Description -> generate silently.
+      2. Preview -> display generated descriptions/tags.
+      3. Save Description -> save the already-generated result.
     ====================================================== */}
 <div
   style={{
@@ -5955,32 +5996,21 @@ setSocialDescriptionPreviewContent("");
     </button>
 
     <button
-  type="button"
-  className="secondary-button"
-  onClick={() => {
-    // Copy the already-generated description into the
-    // preview state ONLY when the user clicks Preview.
-    <button
-  type="button"
-  className="secondary-button"
-  onClick={() => {
-    setIsSocialDescriptionPreviewOpen(true);
-  }}
-  disabled={
-    Object.keys(socialDescriptions).length === 0
-  }
->
-  Preview
-</button>
-
-    setIsSocialDescriptionPreviewOpen(true);
-  }}
-  disabled={
-    Object.keys(socialDescriptions).length === 0
-  }
->
-  Preview
-</button>
+      type="button"
+      className="secondary-button"
+      onClick={() => {
+        // Preview is the ONLY action that opens the generated text.
+        if (Object.keys(socialDescriptions).length > 0) {
+          setIsSocialDescriptionPreviewOpen(true);
+        }
+      }}
+      disabled={
+        Object.keys(socialDescriptions).length === 0 ||
+        isGeneratingSocialDescriptions
+      }
+    >
+      Preview
+    </button>
 
     <button
       type="button"
@@ -6020,7 +6050,6 @@ setSocialDescriptionPreviewContent("");
       {socialDescriptionSaveMessage}
     </p>
   )}
-
 </div>
 
                 {isOutputFolderPickerOpen && (
@@ -6218,15 +6247,18 @@ setSocialDescriptionPreviewContent("");
       onMouseDown={(event) =>
         event.stopPropagation()
       }
+      style={{
+        maxHeight: "85vh",
+        overflowY: "auto",
+      }}
     >
       <div className="modal-header">
         <div>
           <div className="section-kicker">
-            PREVIEW
+            SOCIAL MEDIA PREVIEW
           </div>
-
-          <h2>
-            Social Media Descriptions
+          <h2 style={{ margin: "4px 0 0" }}>
+            Generated Descriptions
           </h2>
         </div>
 
@@ -6248,69 +6280,102 @@ setSocialDescriptionPreviewContent("");
           gap: "14px",
         }}
       >
-        {Object.entries(
-          socialDescriptions,
-        ).map(([platform, item]) => (
-          <article
-            key={platform}
-            className="social-description-preview-card"
-            style={{
-              padding: "16px",
-              borderRadius: "12px",
-              border:
-                "1px solid rgba(255,255,255,0.10)",
-              background:
-                "rgba(255,255,255,0.035)",
-            }}
-          >
-            <div
+        {(Object.entries(socialDescriptions) as Array<[string, SocialDescriptionItem]>).map(
+          ([platform, item]) => (
+            <article
+              key={platform}
+              className="social-description-preview-card"
               style={{
-                display: "flex",
-                justifyContent:
-                  "space-between",
-                alignItems: "center",
-                gap: "12px",
+                padding: "16px",
+                borderRadius: "12px",
+                border:
+                  "1px solid rgba(255,255,255,0.10)",
+                background:
+                  "rgba(255,255,255,0.035)",
               }}
             >
-              <strong
+              <div
                 style={{
-                  fontSize: "16px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: "12px",
                 }}
               >
-                {platform}
-              </strong>
-
-              <span
-                style={{
-                  fontSize: "12px",
-                  opacity: 0.65,
-                }}
-              >
-                {item.character_count} /{" "}
-                {item.character_limit}
-              </span>
-            </div>
-
-            {/* ACTUAL DESCRIPTION */}
-            <div
-              style={{
-                marginTop: "12px",
-                whiteSpace: "pre-wrap",
-                lineHeight: 1.65,
-                fontSize: "14px",
-              }}
-            >
-              {item.text}
-            </div>
-
-            {/* COMPANY TAGS */}
-            {item.company_tags &&
-              item.company_tags.length > 0 && (
-                <div
+                <strong
                   style={{
-                    marginTop: "14px",
+                    fontSize: "16px",
                   }}
                 >
+                  {platform}
+                </strong>
+
+                <span
+                  style={{
+                    fontSize: "12px",
+                    opacity: 0.65,
+                  }}
+                >
+                  {item.character_count} / {item.character_limit}
+                </span>
+              </div>
+
+              <div
+                style={{
+                  marginTop: "12px",
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.65,
+                  fontSize: "14px",
+                }}
+              >
+                {item.text}
+              </div>
+
+              {item.company_tags &&
+                item.company_tags.length > 0 && (
+                  <div style={{ marginTop: "14px" }}>
+                    <strong
+                      style={{
+                        display: "block",
+                        fontSize: "12px",
+                        marginBottom: "7px",
+                        opacity: 0.8,
+                      }}
+                    >
+                      Company Tags
+                    </strong>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: "6px",
+                      }}
+                    >
+                      {item.company_tags.map(
+                        (tag, index) => (
+                          <span
+                            key={`${tag}-${index}`}
+                            style={{
+                              padding: "5px 9px",
+                              borderRadius: "999px",
+                              background:
+                                "rgba(120,100,255,0.12)",
+                              border:
+                                "1px solid rgba(120,100,255,0.25)",
+                              fontSize: "12px",
+                            }}
+                          >
+                            {tag}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              {item.tags && item.tags.length > 0 && (
+                <div style={{ marginTop: "12px" }}>
                   <strong
                     style={{
                       display: "block",
@@ -6319,7 +6384,7 @@ setSocialDescriptionPreviewContent("");
                       opacity: 0.8,
                     }}
                   >
-                    Company Tags
+                    Topic Hashtags
                   </strong>
 
                   <div
@@ -6329,79 +6394,28 @@ setSocialDescriptionPreviewContent("");
                       gap: "6px",
                     }}
                   >
-                    {item.company_tags.map(
-                      (tag, index) => (
-                        <span
-                          key={`${tag}-${index}`}
-                          style={{
-                            padding:
-                              "5px 9px",
-                            borderRadius: "999px",
-                            background:
-                              "rgba(120,100,255,0.12)",
-                            border:
-                              "1px solid rgba(120,100,255,0.25)",
-                            fontSize: "12px",
-                          }}
-                        >
-                          {tag}
-                        </span>
-                      ),
-                    )}
+                    {item.tags.map((tag, index) => (
+                      <span
+                        key={`${tag}-${index}`}
+                        style={{
+                          padding: "5px 9px",
+                          borderRadius: "999px",
+                          background:
+                            "rgba(255,255,255,0.06)",
+                          border:
+                            "1px solid rgba(255,255,255,0.10)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        {tag}
+                      </span>
+                    ))}
                   </div>
                 </div>
               )}
-
-            {/* TOPIC HASHTAGS */}
-            {item.tags &&
-              item.tags.length > 0 && (
-                <div
-                  style={{
-                    marginTop: "12px",
-                  }}
-                >
-                  <strong
-                    style={{
-                      display: "block",
-                      fontSize: "12px",
-                      marginBottom: "7px",
-                      opacity: 0.8,
-                    }}
-                  >
-                    Hashtags
-                  </strong>
-
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      gap: "6px",
-                    }}
-                  >
-                    {item.tags.map(
-                      (tag, index) => (
-                        <span
-                          key={`${tag}-${index}`}
-                          style={{
-                            padding:
-                              "5px 9px",
-                            borderRadius: "999px",
-                            background:
-                              "rgba(255,255,255,0.06)",
-                            border:
-                              "1px solid rgba(255,255,255,0.10)",
-                            fontSize: "12px",
-                          }}
-                        >
-                          {tag}
-                        </span>
-                      ),
-                    )}
-                  </div>
-                </div>
-              )}
-          </article>
-        ))}
+            </article>
+          ),
+        )}
       </div>
 
       <div
@@ -6414,14 +6428,10 @@ setSocialDescriptionPreviewContent("");
         <button
           type="button"
           className="primary-button"
-          onClick={
-            handleSaveSocialDescriptionsToDrive
-          }
+          onClick={handleSaveSocialDescriptionsToDrive}
           disabled={
             socialDescriptionSaved ||
-            Object.keys(
-              socialDescriptions,
-            ).length === 0
+            Object.keys(socialDescriptions).length === 0
           }
         >
           {socialDescriptionSaved
