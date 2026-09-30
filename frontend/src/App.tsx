@@ -3442,21 +3442,38 @@ setSocialDescriptionPreviewContent("");
           const item = value && typeof value === "object" ? value : {};
           const text = String(item.text || item.content || "").trim();
           normalizedDescriptions[platform] = {
-            text,
-            character_count: Number(item.character_count || text.length),
-            character_limit: Number(item.character_limit || 0),
-            word_count: Number(item.word_count || text.split(/\s+/).filter(Boolean).length),
-            target_word_count: Number(item.target_word_count || 0) || undefined,
-            minimum_word_count: Number(item.minimum_word_count || 0) || undefined,
-            maximum_word_count: Number(item.maximum_word_count || 0) || undefined,
-            icon: String(item.icon || "✦"),
-            company_tags: Array.isArray(item.company_tags)
-              ? item.company_tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
-              : [],
-            tags: Array.isArray(item.tags)
-              ? item.tags.map((tag: unknown) => String(tag).trim()).filter(Boolean)
-              : [],
-          };
+  text,
+  character_count: Number(
+    item.character_count || text.length,
+  ),
+  character_limit: Number(
+    item.character_limit || 0,
+  ),
+  word_count: Number(
+    item.word_count ||
+      text.split(/\s+/).filter(Boolean).length,
+  ),
+  target_word_count:
+    Number(item.target_word_count || 0) || undefined,
+  minimum_word_count:
+    Number(item.minimum_word_count || 0) || undefined,
+  maximum_word_count:
+    Number(item.maximum_word_count || 0) || undefined,
+
+  // Icons are metadata only.
+  // They must NEVER be displayed as the description.
+  company_tags: Array.isArray(item.company_tags)
+    ? item.company_tags
+        .map((tag: unknown) => String(tag).trim())
+        .filter(Boolean)
+    : [],
+
+  tags: Array.isArray(item.tags)
+    ? item.tags
+        .map((tag: unknown) => String(tag).trim())
+        .filter(Boolean)
+    : [],
+};
         });
         setSocialDescriptions(normalizedDescriptions);
       } else {
@@ -5943,13 +5960,18 @@ setSocialDescriptionPreviewContent("");
   onClick={() => {
     // Copy the already-generated description into the
     // preview state ONLY when the user clicks Preview.
-    setSocialDescriptionPreviewContent(
-      Object.entries(socialDescriptions)
-        .map(([platform, item]) => {
-          return `[${platform.toUpperCase()}]\n${item.text}`;
-        })
-        .join("\n\n"),
-    );
+    <button
+  type="button"
+  className="secondary-button"
+  onClick={() => {
+    setIsSocialDescriptionPreviewOpen(true);
+  }}
+  disabled={
+    Object.keys(socialDescriptions).length === 0
+  }
+>
+  Preview
+</button>
 
     setIsSocialDescriptionPreviewOpen(true);
   }}
@@ -6190,56 +6212,20 @@ setSocialDescriptionPreviewContent("");
     onMouseDown={() =>
       setIsSocialDescriptionPreviewOpen(false)
     }
-    style={{
-      position: "fixed",
-      inset: 0,
-      zIndex: 1000,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: "24px",
-      background: "rgba(0,0,0,0.72)",
-    }}
   >
     <div
+      className="social-description-modal"
       onMouseDown={(event) =>
         event.stopPropagation()
       }
-      style={{
-        width: "min(900px, 100%)",
-        maxHeight: "85vh",
-        overflowY: "auto",
-        borderRadius: "16px",
-        border:
-          "1px solid rgba(255,255,255,0.12)",
-        background: "#15151a",
-        padding: "20px",
-        boxShadow:
-          "0 24px 80px rgba(0,0,0,0.45)",
-      }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "12px",
-          marginBottom: "16px",
-        }}
-      >
+      <div className="modal-header">
         <div>
-          <div
-            className="section-kicker"
-            style={{
-              fontSize: "11px",
-              fontWeight: 800,
-              opacity: 0.7,
-            }}
-          >
+          <div className="section-kicker">
             PREVIEW
           </div>
 
-          <h2 style={{ margin: "4px 0 0" }}>
+          <h2>
             Social Media Descriptions
           </h2>
         </div>
@@ -6255,80 +6241,197 @@ setSocialDescriptionPreviewContent("");
         </button>
       </div>
 
-      <article
+      <div
+        className="social-description-preview-list"
         style={{
-          padding: "16px",
-          borderRadius: "12px",
-          border:
-            "1px solid rgba(255,255,255,0.10)",
-          background:
-            "rgba(255,255,255,0.035)",
+          display: "grid",
+          gap: "14px",
         }}
       >
-        <strong
-          style={{
-            display: "block",
-            fontSize: "14px",
-            marginBottom: "6px",
-          }}
-        >
-          Generated Description
-        </strong>
-
-        {socialDescriptionFilename && (
-          <div
+        {Object.entries(
+          socialDescriptions,
+        ).map(([platform, item]) => (
+          <article
+            key={platform}
+            className="social-description-preview-card"
             style={{
-              marginBottom: "14px",
-              fontSize: "12px",
-              opacity: 0.65,
+              padding: "16px",
+              borderRadius: "12px",
+              border:
+                "1px solid rgba(255,255,255,0.10)",
+              background:
+                "rgba(255,255,255,0.035)",
             }}
           >
-            {socialDescriptionFilename}
-          </div>
-        )}
-
-        <div
-          style={{
-            whiteSpace: "pre-wrap",
-            lineHeight: 1.65,
-            fontSize: "14px",
-          }}
-        >
-          {socialDescriptionPreviewContent}
-        </div>
-      </article>
-    </div>
-  </div>
-)}
-
             <div
               style={{
                 display: "flex",
-                justifyContent: "flex-end",
-                marginTop: "16px",
+                justifyContent:
+                  "space-between",
+                alignItems: "center",
+                gap: "12px",
               }}
             >
-              <button
-                type="button"
-                className="primary-button"
-                onClick={
-                  handleSaveSocialDescriptionsToDrive
-                }
-                disabled={
-                  socialDescriptionSaved ||
-                  Object.keys(
-                    socialDescriptions,
-                  ).length === 0
-                }
+              <strong
+                style={{
+                  fontSize: "16px",
+                }}
               >
-                {socialDescriptionSaved
-                  ? "Saved to Google Drive / outputs"
-                  : "Save Description"}
-              </button>
+                {platform}
+              </strong>
+
+              <span
+                style={{
+                  fontSize: "12px",
+                  opacity: 0.65,
+                }}
+              >
+                {item.character_count} /{" "}
+                {item.character_limit}
+              </span>
             </div>
-          </div>
-        </div>
-      )}
+
+            {/* ACTUAL DESCRIPTION */}
+            <div
+              style={{
+                marginTop: "12px",
+                whiteSpace: "pre-wrap",
+                lineHeight: 1.65,
+                fontSize: "14px",
+              }}
+            >
+              {item.text}
+            </div>
+
+            {/* COMPANY TAGS */}
+            {item.company_tags &&
+              item.company_tags.length > 0 && (
+                <div
+                  style={{
+                    marginTop: "14px",
+                  }}
+                >
+                  <strong
+                    style={{
+                      display: "block",
+                      fontSize: "12px",
+                      marginBottom: "7px",
+                      opacity: 0.8,
+                    }}
+                  >
+                    Company Tags
+                  </strong>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "6px",
+                    }}
+                  >
+                    {item.company_tags.map(
+                      (tag, index) => (
+                        <span
+                          key={`${tag}-${index}`}
+                          style={{
+                            padding:
+                              "5px 9px",
+                            borderRadius: "999px",
+                            background:
+                              "rgba(120,100,255,0.12)",
+                            border:
+                              "1px solid rgba(120,100,255,0.25)",
+                            fontSize: "12px",
+                          }}
+                        >
+                          {tag}
+                        </span>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
+
+            {/* TOPIC HASHTAGS */}
+            {item.tags &&
+              item.tags.length > 0 && (
+                <div
+                  style={{
+                    marginTop: "12px",
+                  }}
+                >
+                  <strong
+                    style={{
+                      display: "block",
+                      fontSize: "12px",
+                      marginBottom: "7px",
+                      opacity: 0.8,
+                    }}
+                  >
+                    Hashtags
+                  </strong>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: "6px",
+                    }}
+                  >
+                    {item.tags.map(
+                      (tag, index) => (
+                        <span
+                          key={`${tag}-${index}`}
+                          style={{
+                            padding:
+                              "5px 9px",
+                            borderRadius: "999px",
+                            background:
+                              "rgba(255,255,255,0.06)",
+                            border:
+                              "1px solid rgba(255,255,255,0.10)",
+                            fontSize: "12px",
+                          }}
+                        >
+                          {tag}
+                        </span>
+                      ),
+                    )}
+                  </div>
+                </div>
+              )}
+          </article>
+        ))}
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginTop: "16px",
+        }}
+      >
+        <button
+          type="button"
+          className="primary-button"
+          onClick={
+            handleSaveSocialDescriptionsToDrive
+          }
+          disabled={
+            socialDescriptionSaved ||
+            Object.keys(
+              socialDescriptions,
+            ).length === 0
+          }
+        >
+          {socialDescriptionSaved
+            ? "Saved to Google Drive"
+            : "Save Description"}
+        </button>
+      </div>
+    </div>
+  </div>
+)}
 
       {/* ========================================================
           REFERENCE MODAL
