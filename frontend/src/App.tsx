@@ -3425,11 +3425,13 @@ const handleOpenGeneratedImageInCanva = async () => {
       }
 
       setSocialDescriptionFilename(
-        String(data?.social_media_filename || ""),
-      );
-      setSocialDescriptionPreviewContent(
-        String(data?.content || "").trim(),
-      );
+  String(data?.social_media_filename || ""),
+);
+
+// IMPORTANT:
+// Do NOT put generated content into the preview state here.
+// The description must remain hidden until Preview is clicked.
+setSocialDescriptionPreviewContent("");
 
       if (
         data?.descriptions &&
@@ -5936,17 +5938,27 @@ const handleOpenGeneratedImageInCanva = async () => {
     </button>
 
     <button
-      type="button"
-      className="secondary-button"
-      onClick={() =>
-        setIsSocialDescriptionPreviewOpen(true)
-      }
-      disabled={
-        Object.keys(socialDescriptions).length === 0
-      }
-    >
-      Preview
-    </button>
+  type="button"
+  className="secondary-button"
+  onClick={() => {
+    // Copy the already-generated description into the
+    // preview state ONLY when the user clicks Preview.
+    setSocialDescriptionPreviewContent(
+      Object.entries(socialDescriptions)
+        .map(([platform, item]) => {
+          return `[${platform.toUpperCase()}]\n${item.text}`;
+        })
+        .join("\n\n"),
+    );
+
+    setIsSocialDescriptionPreviewOpen(true);
+  }}
+  disabled={
+    Object.keys(socialDescriptions).length === 0
+  }
+>
+  Preview
+</button>
 
     <button
       type="button"
