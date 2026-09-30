@@ -3394,6 +3394,7 @@ const handleOpenGeneratedImageInCanva = async () => {
     }
 
     setIsGeneratingSocialDescriptions(true);
+    setIsSocialDescriptionPreviewOpen(false);
     setSocialDescriptionError("");
     setSocialDescriptionSaved(false);
     setSocialDescriptionSaveMessage("");
@@ -6019,41 +6020,6 @@ const handleOpenGeneratedImageInCanva = async () => {
     </p>
   )}
 
-  {Object.keys(socialDescriptions).length > 0 && (
-    <div
-      style={{
-        display: "grid",
-        gap: "7px",
-        marginTop: "12px",
-      }}
-    >
-      {(Object.entries(socialDescriptions) as Array<[string, SocialDescriptionItem]>).map(
-        ([platform, item]) => (
-          <div
-            key={platform}
-            style={{
-              padding: "10px 12px",
-              borderRadius: "9px",
-              background: "rgba(255,255,255,0.045)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: "12px",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <span style={{ fontSize: "16px" }}>{item.icon || "✦"}</span>
-              <strong style={{ fontSize: "12px" }}>{platform}</strong>
-            </div>
-            <span style={{ opacity: 0.72, fontSize: "12px", fontWeight: 700 }}>
-              {item.word_count} words
-            </span>
-          </div>
-        ),
-      )}
-    </div>
-  )}
 </div>
 
                 {isOutputFolderPickerOpen && (
