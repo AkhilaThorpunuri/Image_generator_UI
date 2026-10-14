@@ -53,9 +53,7 @@ from app.services.template_generator import (
 from app.services.prompt_generator import (
     generate_image_prompt,
 )
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # -------------------------------------------------------------------
 # Application
@@ -2031,22 +2029,12 @@ async def upload_api_keys_file(
     API_KEY_STATE["config"] = dict(values)
 
     configuration_names = {
-    "GEMINI_MODEL", "GOOGLE_AI_MODEL", "MODEL",
-    "GOOGLE_DRIVE_FOLDER_ID", "GDRIVE_FOLDER_ID", "DRIVE_FOLDER_ID",
-    "GOOGLE_DRIVE_FOLDER_URL", "GDRIVE_FOLDER_URL", "DRIVE_FOLDER_URL",
-    "GOOGLE_DRIVE_FOLDER_NAME", "GDRIVE_FOLDER_NAME", "GOOGLE_DRIVE_NAME",
-    "GDRIVE_NAME", "DRIVE_FOLDER_NAME", "DRIVE_NAME",
-    "GOOGLE_DRIVE_OUTPUT_FOLDER_ID",
-    "GDRIVE_OUTPUT_FOLDER_ID",
-    "DRIVE_OUTPUT_FOLDER_ID",
-    "GOOGLE_DRIVE_OUTPUT_FOLDER_URL",
-    "GDRIVE_OUTPUT_FOLDER_URL",
-    "DRIVE_OUTPUT_FOLDER_URL",
-    "GOOGLE_DRIVE_OUTPUT_FOLDER_NAME",
-    "GDRIVE_OUTPUT_FOLDER_NAME",
-    "DRIVE_OUTPUT_FOLDER_NAME",
-}
-
+        "GEMINI_MODEL", "GOOGLE_AI_MODEL", "MODEL",
+        "GOOGLE_DRIVE_FOLDER_ID", "GDRIVE_FOLDER_ID", "DRIVE_FOLDER_ID",
+        "GOOGLE_DRIVE_FOLDER_URL", "GDRIVE_FOLDER_URL", "DRIVE_FOLDER_URL",
+        "GOOGLE_DRIVE_FOLDER_NAME", "GDRIVE_FOLDER_NAME", "GOOGLE_DRIVE_NAME",
+        "GDRIVE_NAME", "DRIVE_FOLDER_NAME", "DRIVE_NAME",
+    }
     provider_counts: dict[str, int] = {}
     for key_name, value in values.items():
         normalized = normalize_key_name(key_name)
@@ -2099,35 +2087,6 @@ async def upload_api_keys_file(
 
     API_KEY_STATE["drive_folder_id"] = drive_folder_id
     API_KEY_STATE["drive_folder_name"] = drive_folder_name
-    
-    drive_output_folder_id = find_config_value(
-        values,
-        (
-            "GOOGLE_DRIVE_OUTPUT_FOLDER_ID",
-            "GDRIVE_OUTPUT_FOLDER_ID",
-            "DRIVE_OUTPUT_FOLDER_ID",
-            "GOOGLE_DRIVE_OUTPUT_FOLDER_URL",
-            "GDRIVE_OUTPUT_FOLDER_URL",
-            "DRIVE_OUTPUT_FOLDER_URL",
-        ),
-    )
-    drive_output_folder_id = normalize_drive_folder_id(
-        drive_output_folder_id
-    )
-
-    drive_output_folder_name = find_config_value(
-        values,
-        (
-            "GOOGLE_DRIVE_OUTPUT_FOLDER_NAME",
-            "GDRIVE_OUTPUT_FOLDER_NAME",
-            "DRIVE_OUTPUT_FOLDER_NAME",
-        ),
-    )
-
-    API_KEY_STATE["drive_output_folder_id"] = drive_output_folder_id
-    if drive_output_folder_name:
-        API_KEY_STATE["drive_output_folder_name"] = drive_output_folder_name
-
     API_KEY_STATE["gemini_model"] = (
         find_config_value(
             values,
@@ -3843,12 +3802,7 @@ def _canva_redirect_uri() -> str:
     configured = str(os.getenv(CANVA_REDIRECT_URI_ENV, "") or "").strip()
     if configured:
         return configured
-    return os.getenv(
-    "CANVA_CONNECT_REDIRECT_URI",
-    "http://127.0.0.1:8000/api/canva/connect/oauth/callback",
-).strip()
-    
-  
+    return "http://localhost:8000/api/canva/connect/oauth/callback"
 
 
 def _canva_frontend_url() -> str:
